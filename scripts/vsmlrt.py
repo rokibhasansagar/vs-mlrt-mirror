@@ -112,16 +112,16 @@ class Backend:
         set use_cuda_graph = True
         """
 
-        max_shapes: typing.Optional[typing.Tuple[int, int]] = None
-        opt_shapes: typing.Optional[typing.Tuple[int, int]] = None
-        fp16: bool = False
+        max_shapes: typing.Optional[typing.Tuple[int, int]] = (1920,1080)
+        opt_shapes: typing.Optional[typing.Tuple[int, int]] = (512,512)
+        fp16: bool = True
         device_id: int = 0
-        workspace: typing.Optional[int] = 128
+        workspace: typing.Optional[int] = 256
         verbose: bool = False
-        use_cuda_graph: bool = False
+        use_cuda_graph: bool = True
         num_streams: int = 1
         use_cublas: bool = False # cuBLAS + cuBLASLt
-        static_shape: bool = True
+        static_shape: bool = False
         tf32: bool = True
         log: bool = True
 
@@ -130,8 +130,8 @@ class Backend:
         use_edge_mask_convolutions: bool = True
         use_jit_convolutions: bool = True
         heuristic: bool = False # only supported on Ampere+ with TensorRT 8.5+
-        output_format: int = 0 # 0: fp32, 1: fp16
-        min_shapes: typing.Tuple[int, int] = (0, 0)
+        output_format: int = 1 # 0: fp32, 1: fp16
+        min_shapes: typing.Tuple[int, int] = (32,32)
         faster_dynamic_shapes: bool = True
         force_fp16: bool = False
 
