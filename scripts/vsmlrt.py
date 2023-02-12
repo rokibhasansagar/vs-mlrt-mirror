@@ -1105,7 +1105,7 @@ def trtexec(
     args = [
         trtexec_path,
         f"--onnx={network_path}",
-        f"--timingCacheFile={engine_path}.cache",
+        f"--timingCacheFile=D:\\vstrt.cache",
         f"--device={device_id}",
         f"--saveEngine={engine_path}"
     ]
