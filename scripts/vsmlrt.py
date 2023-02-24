@@ -1187,7 +1187,7 @@ def trtexec(
 
         if prev_env_value is not None and len(prev_env_value) > 0:
             # env_key has been set, no extra action
-            env = {env_key: prev_env_value}
+            env = {env_key: prev_env_value, 'CUDA_MODULE_LOADING': 'LAZY'}
             subprocess.run(args, env=env, check=True, stdout=sys.stderr)
         else:
             time_str = time.strftime('%y%m%d_%H%M%S', time.localtime())
@@ -1197,7 +1197,7 @@ def trtexec(
                 f"trtexec_{time_str}.log"
             )
 
-            env = {env_key: log_filename}
+            env = {env_key: log_filename, 'CUDA_MODULE_LOADING': 'LAZY'}
 
             completed_process = subprocess.run(args, env=env, check=False, stdout=sys.stderr)
 
@@ -1213,7 +1213,8 @@ def trtexec(
                 else:
                     raise RuntimeError(f"trtexec execution fails but no log is found")
     else:
-        subprocess.run(args, check=True, stdout=sys.stderr)
+        env = {'CUDA_MODULE_LOADING': 'LAZY'}
+        subprocess.run(args, check=True, stdout=sys.stderr, env=env)
 
     return engine_path
 
