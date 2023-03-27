@@ -1,4 +1,4 @@
-__version__ = "3.15.13"
+__version__ = "3.15.16"
 
 __all__ = [
     "Backend", "BackendV2",
@@ -134,6 +134,7 @@ class Backend:
         min_shapes: typing.Tuple[int, int] = (32,32)
         faster_dynamic_shapes: bool = True
         force_fp16: bool = False
+        builder_optimization_level: int = 3
 
         # internal backend attributes
         supports_onnx_serialization: bool = False
@@ -337,11 +338,26 @@ def Waifu2x(
     if scale == 1 and clip.width // width == 2:
         # emulating cv2.resize(interpolation=cv2.INTER_CUBIC)
         # cr: @AkarinVS
+
+        clip_out = clip
+
+        if clip.format.sample_type == vs.FLOAT and clip.format.bits_per_sample != 32:
+            if clip.format.color_family == vs.RGB:
+                clip = core.resize.Point(clip, format=vs.RGBS)
+            else:
+                clip = core.resize.Point(clip, format=vs.GRAYS)
+
         clip = core.fmtc.resample(
             clip, scale=0.5,
             kernel="impulse", impulse=[-0.1875, 1.375, -0.1875],
             kovrspl=2
         )
+
+        if clip_out.format.sample_type == vs.FLOAT and clip_out.format.bits_per_sample == 16:
+            if clip.format.color_family == vs.RGB:
+                clip = core.resize.Point(clip, format=vs.RGBH)
+            else:
+                clip = core.resize.Point(clip, format=vs.GRAYH)
 
     return clip
 
@@ -532,7 +548,15 @@ def RealESRGAN(
             if rescale > 1:
                 clip = core.fmtc.resample(clip, scale=rescale, kernel="lanczos", taps=4)
             else:
+                clip_out = clip
+
+                if clip.format.sample_type == vs.FLOAT and clip.format.bits_per_sample != 32:
+                    clip = core.resize.Point(clip, format=vs.RGBS)
+
                 clip = core.fmtc.resample(clip, scale=rescale, kernel="lanczos", taps=4, fh=1/rescale, fv=1/rescale)
+
+                if clip_out.format.sample_type == vs.FLOAT and clip_out.format.bits_per_sample == 16:
+                    clip = core.resize.Point(clip, format=vs.RGBH)
 
     return clip
 
@@ -779,7 +803,8 @@ def RIFEMerge(
     overlap: typing.Optional[typing.Union[int, typing.Tuple[int, int]]] = None,
     model: typing.Literal[40, 42, 43, 44, 45, 46] = 44,
     backend: backendT = Backend.OV_CPU(),
-    ensemble: bool = False
+    ensemble: bool = False,
+    _implementation: typing.Optional[typing.Literal[1, 2]] = None
 ) -> vs.VideoNode:
     """ temporal MaskedMerge-like interface for the RIFE model
 
@@ -834,10 +859,12 @@ def RIFEMerge(
         "rife_v2",
         f"rife_v{model // 10}.{model % 10}{'_ensemble' if ensemble else ''}.onnx"
     )
-    if os.path.exists(network_path) and scale == 1.0:
-        clips = [clipa, clipb, mask]
+    if _implementation != 1 and os.path.exists(network_path) and scale == 1.0:
+        implementation_version = 2
         multiple = 1 # v2 implements internal padding
+        clips = [clipa, clipb, mask]
     else:
+        implementation_version = 1
         # v2 onnx not found, try v1
         network_path = os.path.join(
             models_path,
@@ -870,6 +897,8 @@ def RIFEMerge(
             overlap=(overlap_w, overlap_h), tilesize=(tile_w, tile_h),
             backend=backend
         )
+    elif ensemble or implementation_version != 1:
+        raise ValueError(f'{func_name}: currently not supported')
     else:
         import onnx
         from onnx.numpy_helper import from_array, to_array
@@ -934,7 +963,8 @@ def RIFE(
     overlap: typing.Optional[typing.Union[int, typing.Tuple[int, int]]] = None,
     model: typing.Literal[40, 42, 43, 44, 45, 46] = 44,
     backend: backendT = Backend.OV_CPU(),
-    ensemble: bool = False
+    ensemble: bool = False,
+    _implementation: typing.Optional[typing.Literal[1, 2]] = None
 ) -> vs.VideoNode:
     """ RIFE: Real-Time Intermediate Flow Estimation for Video Frame Interpolation
 
@@ -953,6 +983,10 @@ def RIFE(
         scale: Controls the process resolution for optical flow model.
             32 / fractions.Fraction(scale) must be an integer.
             scale=0.5 is recommended for 4K video.
+
+        _implementation: (None, 1 or 2, experimental and maybe removed in the future)
+            Switch between different onnx implementation.
+            Implmementation will be selected based on internal heuristic if it is None.
     """
 
     func_name = "vsmlrt.RIFE"
@@ -987,7 +1021,8 @@ def RIFE(
     output0 = RIFEMerge(
         clipa=initial, clipb=terminal, mask=timepoint,
         scale=scale, tiles=tiles, tilesize=tilesize, overlap=overlap,
-        model=model, backend=backend, ensemble=ensemble
+        model=model, backend=backend, ensemble=ensemble,
+        _implementation=_implementation
     )
 
     clip = bits_as(clip, output0)
@@ -1087,7 +1122,8 @@ def trtexec(
     output_format: int = 0,
     min_shapes: typing.Tuple[int, int] = (0, 0),
     faster_dynamic_shapes: bool = True,
-    force_fp16: bool = False
+    force_fp16: bool = False,
+    builder_optimization_level: int = 3
 ) -> str:
 
     # tensort runtime version, e.g. 8401 => 8.4.1
@@ -1190,20 +1226,26 @@ def trtexec(
             "--noDataTransfers"
         ))
     else:
-        args.append("--buildOnly")
+        if trt_version >= 8600:
+            args.append("--skipInference")
+        else:
+            args.append("--buildOnly")
 
     if not tf32:
         args.append("--noTF32")
 
     if heuristic and trt_version >= 8500 and core.trt.DeviceProperties(device_id)["major"] >= 8:
-        args.append("--heuristic")
+        if trt_version < 8600:
+            args.append("--heuristic")
+        else:
+            builder_optimization_level = 2
 
     args.extend([
         "--inputIOFormats=fp32:chw" if input_format == 0 else "--inputIOFormats=fp16:chw",
         "--outputIOFormats=fp32:chw" if output_format == 0 else "--outputIOFormats=fp16:chw"
     ])
 
-    if faster_dynamic_shapes and not static_shape and trt_version >= 8500:
+    if faster_dynamic_shapes and not static_shape and 8500 <= trt_version < 8600:
         args.append("--preview=+fasterDynamicShapes0805")
 
     if force_fp16:
@@ -1215,6 +1257,9 @@ def trtexec(
             ])
         else:
             raise ValueError('"force_fp16" is not available')
+
+    if trt_version >= 8600:
+        args.append(f"--builderOptimizationLevel={builder_optimization_level}")
 
     if log:
         env_key = "TRTEXEC_LOG_FILE"
@@ -1429,7 +1474,8 @@ def _inference(
             output_format=backend.output_format,
             min_shapes=backend.min_shapes,
             faster_dynamic_shapes=backend.faster_dynamic_shapes,
-            force_fp16=backend.force_fp16
+            force_fp16=backend.force_fp16,
+            builder_optimization_level=backend.builder_optimization_level
         )
         clip = core.trt.Model(
             clips, engine_path,
