@@ -130,7 +130,7 @@ class Backend:
         use_edge_mask_convolutions: bool = True
         use_jit_convolutions: bool = True
         heuristic: bool = False # only supported on Ampere+ with TensorRT 8.5+
-        output_format: int = 1 # 0: fp32, 1: fp16
+        output_format: int = 0 # 0: fp32, 1: fp16
         min_shapes: typing.Tuple[int, int] = (32,32)
         faster_dynamic_shapes: bool = True
         force_fp16: bool = False
