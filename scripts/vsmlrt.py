@@ -126,7 +126,7 @@ class Backend:
         log: bool = True
 
         # as of TensorRT 8.4, it can be turned off without performance penalty in most cases
-        use_cudnn: bool = True
+        use_cudnn: bool = False
         use_edge_mask_convolutions: bool = True
         use_jit_convolutions: bool = True
         heuristic: bool = False # only supported on Ampere+ with TensorRT 8.5+
@@ -1114,7 +1114,7 @@ def trtexec(
     min_shapes: typing.Tuple[int, int] = (0, 0),
     faster_dynamic_shapes: bool = True,
     force_fp16: bool = False,
-    builder_optimization_level: int = 3
+    builder_optimization_level: int = 2
 ) -> str:
 
     # tensort runtime version, e.g. 8401 => 8.4.1
