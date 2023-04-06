@@ -207,7 +207,7 @@ def Waifu2x(
     tilesize: typing.Optional[typing.Union[int, typing.Tuple[int, int]]] = None,
     overlap: typing.Optional[typing.Union[int, typing.Tuple[int, int]]] = None,
     model: typing.Literal[0, 1, 2, 3, 4, 5, 6, 7, 8] = 6,
-    backend: backendT = Backend.OV_CPU(),
+    backend: backendT = Backend.TRT(),
     preprocess: bool = True
 ) -> vs.VideoNode:
 
@@ -376,7 +376,7 @@ def DPIR(
     tilesize: typing.Optional[typing.Union[int, typing.Tuple[int, int]]] = None,
     overlap: typing.Optional[typing.Union[int, typing.Tuple[int, int]]] = None,
     model: typing.Literal[0, 1, 2, 3] = 0,
-    backend: backendT = Backend.OV_CPU()
+    backend: backendT = Backend.TRT()
 ) -> vs.VideoNode:
 
     func_name = "vsmlrt.DPIR"
@@ -476,7 +476,7 @@ def RealESRGAN(
     tilesize: typing.Optional[typing.Union[int, typing.Tuple[int, int]]] = None,
     overlap: typing.Optional[typing.Union[int, typing.Tuple[int, int]]] = None,
     model: typing.Literal[0, 1, 2] = 0,
-    backend: backendT = Backend.OV_CPU(),
+    backend: backendT = Backend.TRT(),
     scale: typing.Optional[float] = None
 ) -> vs.VideoNode:
 
@@ -561,7 +561,7 @@ def CUGAN(
     tiles: typing.Optional[typing.Union[int, typing.Tuple[int, int]]] = None,
     tilesize: typing.Optional[typing.Union[int, typing.Tuple[int, int]]] = None,
     overlap: typing.Optional[typing.Union[int, typing.Tuple[int, int]]] = None,
-    backend: backendT = Backend.OV_CPU(),
+    backend: backendT = Backend.TRT(),
     preprocess: bool = True,
     alpha: float = 1.0,
     version: typing.Literal[1, 2] = 1, # 1: legacy, 2: pro
@@ -793,7 +793,7 @@ def RIFEMerge(
     tilesize: typing.Optional[typing.Union[int, typing.Tuple[int, int]]] = None,
     overlap: typing.Optional[typing.Union[int, typing.Tuple[int, int]]] = None,
     model: typing.Literal[40, 42, 43, 44, 45, 46] = 44,
-    backend: backendT = Backend.OV_CPU(),
+    backend: backendT = Backend.TRT(),
     ensemble: bool = False,
     _implementation: typing.Optional[typing.Literal[1, 2]] = None
 ) -> vs.VideoNode:
@@ -953,7 +953,7 @@ def RIFE(
     tilesize: typing.Optional[typing.Union[int, typing.Tuple[int, int]]] = None,
     overlap: typing.Optional[typing.Union[int, typing.Tuple[int, int]]] = None,
     model: typing.Literal[40, 42, 43, 44, 45, 46] = 44,
-    backend: backendT = Backend.OV_CPU(),
+    backend: backendT = Backend.TRT(),
     ensemble: bool = False,
     _implementation: typing.Optional[typing.Literal[1, 2]] = None
 ) -> vs.VideoNode:
@@ -1533,7 +1533,7 @@ def inference(
     network_path: str,
     overlap: typing.Tuple[int, int] = (0, 0),
     tilesize: typing.Optional[typing.Tuple[int, int]] = None,
-    backend: backendT = Backend.OV_CPU(),
+    backend: backendT = Backend.TRT(),
     input_name: typing.Optional[str] = "input"
 ) -> vs.VideoNode:
 
