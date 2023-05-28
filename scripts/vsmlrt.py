@@ -1,4 +1,4 @@
-__version__ = "3.15.22"
+__version__ = "3.15.24"
 
 __all__ = [
     "Backend", "BackendV2",
@@ -12,7 +12,7 @@ __all__ = [
 ]
 
 import copy
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import enum
 import math
 import os
@@ -172,6 +172,19 @@ class Backend:
         # internal backend attributes
         supports_onnx_serialization: bool = True
 
+    @dataclass(frozen=False)
+    class ORT_DML:
+        """ backend for directml (d3d12) devices """
+
+        device_id: int = 0
+        num_streams: int = 1
+        verbosity: int = 2
+        fp16: bool = False
+        fp16_blacklist_ops: typing.Optional[typing.Sequence[str]] = None
+
+        # internal backend attributes
+        supports_onnx_serialization: bool = True
+
 
 backendT = typing.Union[
     Backend.OV_CPU,
@@ -179,7 +192,8 @@ backendT = typing.Union[
     Backend.ORT_CUDA,
     Backend.TRT,
     Backend.OV_GPU,
-    Backend.NCNN_VK
+    Backend.NCNN_VK,
+    Backend.ORT_DML,
 ]
 
 
@@ -198,6 +212,7 @@ class Waifu2xModel(enum.IntEnum):
     swin_unet_art = 7
     swin_unet_photo = 8 # 20230329
     swin_unet_photo_v2 = 9 # 20230407
+    swin_unet_art_scan = 10 # 20230504
 
 
 def Waifu2x(
@@ -245,7 +260,7 @@ def Waifu2x(
         raise ValueError(f'{func_name}: "clip" must be of RGB color family')
 
     if overlap is None:
-        overlap_w = overlap_h = [8, 8, 8, 8, 8, 4, 4, 4, 4, 4][model]
+        overlap_w = overlap_h = [8, 8, 8, 8, 8, 4, 4, 4, 4, 4, 4][model]
     elif isinstance(overlap, int):
         overlap_w = overlap_h = overlap
     else:
@@ -326,7 +341,7 @@ def Waifu2x(
                 model_name = f"noise{noise}.onnx"
             else:
                 model_name = f"noise{noise}_{scale_name}.onnx"
-    elif model in (8, 9):
+    elif model in (8, 9, 10):
         scale_name = "scale4x"
         if noise == -1:
             model_name = f"{scale_name}.onnx"
@@ -353,7 +368,7 @@ def Waifu2x(
             kovrspl=2
         )
 
-    elif model in (8, 9) and scale != 4:
+    elif model in (8, 9, 10) and scale != 4:
         clip = core.resize.Bicubic(
             clip, clip.width * scale // 4, clip.height * scale // 4,
             filter_param_a=0, filter_param_b=0.5
@@ -467,6 +482,12 @@ class RealESRGANModel(enum.IntEnum):
     animevideo_xsx4 = 1
     # v3
     animevideov3 = 2 # 4x
+    # contributed: janai(2x) https://github.com/the-database/mpv-upscale-2x_animejanai/releases/tag/1.0.0 maintainer: hooke007 
+    animejanaiL1_sharp = 5000
+    animejanaiL2_std = 5001
+    animejanaiL2_sharp = 5002
+    animejanaiL3_std = 5003
+    animejanaiL3_sharp = 5004
 
 RealESRGANv2Model = RealESRGANModel
 
@@ -476,7 +497,7 @@ def RealESRGAN(
     tiles: typing.Optional[typing.Union[int, typing.Tuple[int, int]]] = None,
     tilesize: typing.Optional[typing.Union[int, typing.Tuple[int, int]]] = None,
     overlap: typing.Optional[typing.Union[int, typing.Tuple[int, int]]] = None,
-    model: typing.Literal[0, 1, 2] = 0,
+    model: RealESRGANv2Model = 0,
     backend: backendT = Backend.TRT(),
     scale: typing.Optional[float] = None
 ) -> vs.VideoNode:
@@ -493,7 +514,7 @@ def RealESRGAN(
         raise ValueError(f'{func_name}: "clip" must be of RGB color family')
 
     if not isinstance(model, int) or model not in RealESRGANv2Model.__members__.values():
-        raise ValueError(f'{func_name}: "model" must be 0, 1 or 2')
+        raise ValueError(f'{func_name}: invalid "model"')
 
     if overlap is None:
         overlap_w = overlap_h = 8
@@ -527,6 +548,12 @@ def RealESRGAN(
             models_path,
             "RealESRGANv2",
             "realesr-animevideov3.onnx"
+        )
+    elif model in [5000, 5001, 5002, 5003, 5004]:
+        network_path = os.path.join(
+            models_path,
+            "RealESRGANv2",
+            f"{RealESRGANv2Model(model).name}.onnx".replace('_', '-')
         )
 
     clip_org = clip
@@ -1387,6 +1414,18 @@ def _inference(
             path_is_serialization=path_is_serialization,
             fp16_blacklist_ops=backend.fp16_blacklist_ops
         )
+    elif isinstance(backend, Backend.ORT_DML):
+        clip = core.ort.Model(
+            clips, network_path,
+            overlap=overlap, tilesize=tilesize,
+            provider="DML", builtin=False,
+            device_id=backend.device_id,
+            num_streams=backend.num_streams,
+            verbosity=backend.verbosity,
+            fp16=backend.fp16,
+            path_is_serialization=path_is_serialization,
+            fp16_blacklist_ops=backend.fp16_blacklist_ops
+        )
     elif isinstance(backend, Backend.ORT_CUDA):
         clip = core.ort.Model(
             clips, network_path,
@@ -1686,6 +1725,20 @@ class BackendV2:
             num_streams=num_streams,
             fp16=fp16,
             device_id=device_id,
+            **kwargs
+        )
+
+    @staticmethod
+    def ORT_DML(*,
+        device_id: int = 0,
+        num_streams: int = 1,
+        fp16: bool = False,
+        **kwargs
+    ) -> Backend.ORT_DML:
+        return Backend.ORT_DML(
+            device_id=device_id,
+            num_streams=num_streams,
+            fp16=fp16,
             **kwargs
         )
 
