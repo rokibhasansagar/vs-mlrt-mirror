@@ -1,4 +1,4 @@
-__version__ = "3.15.26"
+__version__ = "3.15.34"
 
 __all__ = [
     "Backend", "BackendV2",
@@ -12,7 +12,7 @@ __all__ = [
 ]
 
 import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import enum
 import math
 import os
@@ -135,6 +135,8 @@ class Backend:
         faster_dynamic_shapes: bool = True
         force_fp16: bool = False
         builder_optimization_level: int = 3
+        custom_env: typing.Dict[str, str] = field(default_factory=lambda: {})
+        custom_args: typing.List[str] = field(default_factory=lambda: [])
 
         # internal backend attributes
         supports_onnx_serialization: bool = False
@@ -802,6 +804,10 @@ def get_rife_input(clip: vs.VideoNode) -> typing.List[vs.VideoNode]:
 
 @enum.unique
 class RIFEModel(enum.IntEnum):
+    """
+    Starting from RIFE v4.12 lite, this interface does not provide forward compatiblity in enum values.
+    """
+
     v4_0 = 40
     v4_2 = 42
     v4_3 = 43
@@ -810,6 +816,11 @@ class RIFEModel(enum.IntEnum):
     v4_6 = 46
     v4_7 = 47
     v4_8 = 48
+    v4_9 = 49
+    v4_10 = 410
+    v4_11 = 411
+    v4_12 = 412
+    v4_12_lite = 4121
 
 
 def RIFEMerge(
@@ -872,13 +883,18 @@ def RIFEMerge(
     multiple = int(multiple_frac.numerator)
     scale = float(Fraction(scale))
 
-    if model >= 47 and (ensemble or scale != 1.0 or _implementation == 2):
+    model_major = int(str(int(model))[0])
+    model_minor = int(str(int(model))[1:3])
+    lite = "_lite" if len(str(int(model))) >= 4 else ""
+    version = f"v{model_major}.{model_minor}{lite}{'_ensemble' if ensemble else ''}"
+
+    if (model_major, model_minor) >= (4, 7) and (scale != 1.0):
         raise ValueError("not supported")
 
     network_path = os.path.join(
         models_path,
         "rife_v2",
-        f"rife_v{model // 10}.{model % 10}{'_ensemble' if ensemble else ''}.onnx"
+        f"rife_{version}.onnx"
     )
     if _implementation == 2 and os.path.exists(network_path) and scale == 1.0:
         implementation_version = 2
@@ -890,7 +906,7 @@ def RIFEMerge(
         network_path = os.path.join(
             models_path,
             "rife",
-            f"rife_v{model // 10}.{model % 10}{'_ensemble' if ensemble else ''}.onnx"
+            f"rife_{version}.onnx"
         )
 
         clips = [clipa, clipb, mask, *get_rife_input(clipa)]
@@ -911,6 +927,22 @@ def RIFEMerge(
         backend=backend,
         trt_opt_shapes=(tile_w, tile_h)
     )
+
+    if _implementation == 2:
+        if isinstance(backend, Backend.TRT):
+            # https://github.com/AmusementClub/vs-mlrt/issues/66#issuecomment-1791986979
+            if (4, 0) <= (model_major, model_minor):
+                backend.custom_args.extend([
+                    "--precisionConstraints=obey", 
+                    "--layerPrecisions=" + (
+                        "/Cast_2:fp32,/Cast_3:fp32,/Cast_5:fp32,/Cast_7:fp32,"
+                        "/Reciprocal:fp32,/Reciprocal_1:fp32,"
+                        "/Mul:fp32,/Mul_1:fp32,/Mul_8:fp32,/Mul_10:fp32,"
+                        "/Sub_5:fp32,/Sub_6:fp32,"
+                        "ONNXTRT_Broadcast_236:fp32,ONNXTRT_Broadcast_238:fp32,"
+                        "ONNXTRT_Broadcast_273:fp32,ONNXTRT_Broadcast_275:fp32"
+                    )
+                ])
 
     if scale == 1.0:
         return inference_with_fallback(
@@ -1144,7 +1176,9 @@ def trtexec(
     min_shapes: typing.Tuple[int, int] = (0, 0),
     faster_dynamic_shapes: bool = True,
     force_fp16: bool = False,
-    builder_optimization_level: int = 2
+    builder_optimization_level: int = 3,
+    custom_env: typing.Dict[str, str] = {},
+    custom_args: typing.List[str] = []
 ) -> str:
 
     # tensort runtime version, e.g. 8401 => 8.4.1
@@ -1282,13 +1316,16 @@ def trtexec(
     if trt_version >= 8600:
         args.append(f"--builderOptimizationLevel={builder_optimization_level}")
 
+    args.extend(custom_args)
+
     if log:
         env_key = "TRTEXEC_LOG_FILE"
         prev_env_value = os.environ.get(env_key)
 
         if prev_env_value is not None and len(prev_env_value) > 0:
             # env_key has been set, no extra action
-            env = {env_key: prev_env_value, 'CUDA_MODULE_LOADING': 'LAZY'}
+            env = {env_key: prev_env_value}
+            env.update(**custom_env)
             subprocess.run(args, env=env, check=True, stdout=sys.stderr)
         else:
             time_str = time.strftime('%y%m%d_%H%M%S', time.localtime())
@@ -1298,7 +1335,8 @@ def trtexec(
                 f"trtexec_{time_str}.log"
             )
 
-            env = {env_key: log_filename, 'CUDA_MODULE_LOADING': 'LAZY'}
+            env = {env_key: log_filename}
+            env.update(**custom_env)
 
             completed_process = subprocess.run(args, env=env, check=False, stdout=sys.stderr)
 
@@ -1314,8 +1352,9 @@ def trtexec(
                 else:
                     raise RuntimeError(f"trtexec execution fails but no log is found")
     else:
-        env = {'CUDA_MODULE_LOADING': 'LAZY'}
-        subprocess.run(args, check=True, stdout=sys.stderr, env=env)
+        env = {"CUDA_MODULE_LOADING": "LAZY"}
+        env.update(**custom_env)
+        subprocess.run(args, env=env, check=True, stdout=sys.stderr)
 
     return engine_path
 
@@ -1510,7 +1549,9 @@ def _inference(
             min_shapes=backend.min_shapes,
             faster_dynamic_shapes=backend.faster_dynamic_shapes,
             force_fp16=backend.force_fp16,
-            builder_optimization_level=backend.builder_optimization_level
+            builder_optimization_level=backend.builder_optimization_level,
+            custom_env=backend.custom_env,
+            custom_args=backend.custom_args
         )
         clip = core.trt.Model(
             clips, engine_path,
