@@ -1,4 +1,4 @@
-__version__ = "3.15.40"
+__version__ = "3.15.42"
 
 __all__ = [
     "Backend", "BackendV2",
@@ -15,6 +15,7 @@ __all__ = [
 import copy
 from dataclasses import dataclass, field
 import enum
+from fractions import Fraction
 import math
 import os
 import subprocess
@@ -834,8 +835,8 @@ def RIFEMerge(
     tiles: typing.Optional[typing.Union[int, typing.Tuple[int, int]]] = None,
     tilesize: typing.Optional[typing.Union[int, typing.Tuple[int, int]]] = None,
     overlap: typing.Optional[typing.Union[int, typing.Tuple[int, int]]] = None,
-    model: typing.Literal[40, 42, 43, 44, 45, 46] = 44,
-    backend: backendT = Backend.TRT(),
+    model: RIFEModel = RIFEModel.v4_4,
+    backend: backendT = Backend.OV_CPU(),
     ensemble: bool = False,
     _implementation: typing.Optional[typing.Literal[1, 2]] = None
 ) -> vs.VideoNode:
@@ -845,8 +846,6 @@ def RIFEMerge(
     except that it merges the two clips in the time domain and you specify the "mask" based
     on the time point of the resulting clip (range (0,1)) between the two clips.
     """
-
-    from fractions import Fraction
 
     func_name = "vsmlrt.RIFEMerge"
 
@@ -891,7 +890,7 @@ def RIFEMerge(
     lite = "_lite" if len(str(int(model))) >= 4 else ""
     version = f"v{model_major}.{model_minor}{lite}{'_ensemble' if ensemble else ''}"
 
-    if (model_major, model_minor) >= (4, 7) and (scale != 1.0):
+    if (model_major, model_minor) >= (4, 7) and scale != 1.0:
         raise ValueError("not supported")
 
     network_path = os.path.join(
@@ -931,7 +930,7 @@ def RIFEMerge(
         trt_opt_shapes=(tile_w, tile_h)
     )
 
-    if _implementation == 2:
+    if implementation_version == 2:
         if isinstance(backend, Backend.TRT):
             # https://github.com/AmusementClub/vs-mlrt/issues/66#issuecomment-1791986979
             if (4, 0) <= (model_major, model_minor):
@@ -1016,14 +1015,15 @@ def RIFEMerge(
 
 def RIFE(
     clip: vs.VideoNode,
-    multi: int = 2,
+    multi: typing.Union[int, Fraction] = 2,
     scale: float = 1.0,
     tiles: typing.Optional[typing.Union[int, typing.Tuple[int, int]]] = None,
     tilesize: typing.Optional[typing.Union[int, typing.Tuple[int, int]]] = None,
     overlap: typing.Optional[typing.Union[int, typing.Tuple[int, int]]] = None,
-    model: typing.Literal[40, 42, 43, 44, 45, 46] = 44,
-    backend: backendT = Backend.TRT(),
+    model: RIFEModel = RIFEModel.v4_4,
+    backend: backendT = Backend.OV_CPU(),
     ensemble: bool = False,
+    video_player: bool = False,
     _implementation: typing.Optional[typing.Literal[1, 2]] = None
 ) -> vs.VideoNode:
     """ RIFE: Real-Time Intermediate Flow Estimation for Video Frame Interpolation
@@ -1037,7 +1037,7 @@ def RIFE(
     and/or filter to achieve the best quality.
 
     Args:
-        multi: Multiple of the frame counts.
+        multi: Multiple of the frame counts, can be a fractions.Fraction.
             Default: 2.
 
         scale: Controls the process resolution for optical flow model.
@@ -1060,6 +1060,9 @@ def RIFE(
     if clip.format.color_family != vs.RGB:
         raise ValueError(f'{func_name}: "clip" must be of RGB color family')
 
+    if not isinstance(multi, (int, Fraction)):
+        raise TypeError(f'{func_name}: "multi" must be an integer or a fractions.Fraction!')
+
     if multi < 2:
         raise ValueError(f'{func_name}: RIFE: multi must be at least 2')
 
@@ -1068,42 +1071,162 @@ def RIFE(
 
     gray_format = vs.GRAYS if clip.format.bits_per_sample == 32 else vs.GRAYH
 
-    initial = core.std.Interleave([clip] * (multi - 1))
+    if int(multi) == multi:
+        multi = int(multi)
 
-    terminal = clip.std.DuplicateFrames(frames=clip.num_frames - 1).std.Trim(first=1)
-    terminal = core.std.Interleave([terminal] * (multi - 1))
+        if multi < 2:
+            raise ValueError(f'{func_name}: RIFE: multi must be at least 2')
 
-    timepoint = core.std.Interleave([
-        clip.std.BlankClip(format=gray_format, color=i/multi, length=1)
-        for i in range(1, multi)
-    ]).std.Loop(clip.num_frames)
+        initial = core.std.Interleave([clip] * (multi - 1))
 
-    output0 = RIFEMerge(
-        clipa=initial, clipb=terminal, mask=timepoint,
-        scale=scale, tiles=tiles, tilesize=tilesize, overlap=overlap,
-        model=model, backend=backend, ensemble=ensemble,
-        _implementation=_implementation
-    )
+        terminal = clip.std.DuplicateFrames(frames=clip.num_frames - 1).std.Trim(first=1)
+        terminal = core.std.Interleave([terminal] * (multi - 1))
 
-    clip = bits_as(clip, output0)
-    initial = core.std.Interleave([clip] * (multi - 1))
+        timepoint = core.std.Interleave([
+            clip.std.BlankClip(format=gray_format, color=i/multi, length=1)
+            for i in range(1, multi)
+        ]).std.Loop(clip.num_frames)
 
-    if hasattr(core, 'akarin') and hasattr(core.akarin, 'Select'):
-        output = core.akarin.Select([output0, initial], initial, 'x._SceneChangeNext 1 0 ?')
+        output0 = RIFEMerge(
+            clipa=initial, clipb=terminal, mask=timepoint,
+            scale=scale, tiles=tiles, tilesize=tilesize, overlap=overlap,
+            model=model, backend=backend, ensemble=ensemble,
+            _implementation=_implementation
+        )
+
+        clip = bits_as(clip, output0)
+        initial = core.std.Interleave([clip] * (multi - 1))
+
+        if hasattr(core, 'akarin') and hasattr(core.akarin, 'Select'):
+            output = core.akarin.Select([output0, initial], initial, 'x._SceneChangeNext 1 0 ?')
+        else:
+            def handler(n: int, f: vs.VideoFrame) -> vs.VideoNode:
+                if f.props.get('_SceneChangeNext'):
+                    return initial
+                return output0
+            output = core.std.FrameEval(output0, handler, initial)
+
+        if multi == 2:
+            res = core.std.Interleave([clip, output])
+        else:
+            res = core.std.Interleave([
+                clip,
+                *(output.std.SelectEvery(cycle=multi-1, offsets=i) for i in range(multi - 1))
+            ])
+
+        if clip.fps_num != 0 and clip.fps_den != 0:
+            return res.std.AssumeFPS(fpsnum = clip.fps_num * multi, fpsden = clip.fps_den)
+        else:
+            return res
     else:
-        def handler(n: int, f: vs.VideoFrame) -> vs.VideoNode:
-            if f.props.get('_SceneChangeNext'):
-                return initial
-            return output0
-        output = core.std.FrameEval(output0, handler, initial)
+        if clip.fps_num == 0 or clip.fps_den == 0:
+            src_fps = Fraction(1)
+        else:
+            src_fps = clip.fps
 
-    if multi == 2:
-        return core.std.Interleave([clip, output])
-    else:
-        return core.std.Interleave([
-            clip,
-            *(output.std.SelectEvery(cycle=multi-1, offsets=i) for i in range(multi - 1))
-        ])
+        dst_fps = src_fps * multi
+        src_frames = clip.num_frames
+        dst_frames = min(int(src_frames * multi), 2 ** 31 - 1)
+
+        duration_rel = src_fps / dst_fps
+        dst_duration = duration_rel.numerator
+        src_duration = duration_rel.denominator
+
+        # https://github.com/AmusementClub/vs-mlrt/issues/59#issuecomment-1842649342
+        if video_player:
+            temp = core.std.BlankClip(clip, length=dst_frames, keep=True)
+
+            def left_func(n: int) -> vs.VideoNode:
+                return clip[dst_duration * n // src_duration]
+            left_clip = core.std.FrameEval(temp, left_func)
+
+            def right_func(n: int) -> vs.VideoNode:
+                return clip[dst_duration * n // src_duration + 1]
+            right_clip = core.std.FrameEval(temp, right_func)
+
+            temp_gray = core.std.BlankClip(temp, format=gray_format, keep=True)
+            def timepoint_func(n: int) -> vs.VideoNode:
+                current_time = dst_duration * n
+                left_index = current_time // src_duration
+                left_time = src_duration * left_index
+                tp = (current_time - left_time) / src_duration
+                return temp_gray.std.BlankClip(color=tp, keep=True)
+            tp_clip = core.std.FrameEval(temp_gray, timepoint_func)
+
+            output = RIFEMerge(
+                clipa=left_clip, clipb=right_clip, mask=tp_clip,
+                scale=scale, tiles=tiles, tilesize=tilesize, overlap=overlap,
+                model=model, backend=backend, ensemble=ensemble,
+                _implementation=_implementation
+            )
+
+            left0 = bits_as(left_clip, output)
+
+            def filter_sc(n: int, f: vs.VideoFrame) -> vs.VideoNode:
+                current_time = dst_duration * n
+                left_index = current_time // src_duration
+                if (
+                    current_time % src_duration == 0 or
+                    left_index + 1 >= src_frames or
+                    f.props.get("_SceneChangeNext", False)
+                ):
+                    return left0
+                else:
+                    return output
+
+            res = core.std.FrameEval(output, filter_sc, left0)
+        else:
+            if not hasattr(core, 'akarin') or \
+                not hasattr(core.akarin, 'PropExpr') or \
+                not hasattr(core.akarin, 'PickFrames'):
+                raise RuntimeError(
+                    'fractional multi requires plugin akarin '
+                    '(https://github.com/AkarinVS/vapoursynth-plugin/releases)'
+                    ', version v0.96g or later.')
+
+            left_indices = []
+            right_indices = []
+            timepoints = []
+            output_indices = []
+
+            for i in range(dst_frames):
+                current_time = dst_duration * i
+                if current_time % src_duration == 0:
+                    output_indices.append(current_time // src_duration)
+                else:
+                    left_index = current_time // src_duration
+                    if left_index + 1 >= src_frames:
+                        # approximate last frame with last frame of source
+                        output_indices.append(src_frames - 1)
+                        break
+                    output_indices.append(src_frames + len(timepoints))
+                    left_indices.append(left_index)
+                    right_indices.append(left_index + 1)
+                    left_time = src_duration * left_index
+                    tp = (current_time - left_time) / src_duration
+                    timepoints.append(tp)
+
+            left_clip = core.akarin.PickFrames(clip, left_indices)
+            right_clip = core.akarin.PickFrames(clip, right_indices)
+            tp_clip = core.std.BlankClip(clip, format=gray_format, length=len(timepoints))
+            tp_clip = tp_clip.akarin.PropExpr(lambda: dict(_tp=timepoints)).akarin.Expr('x._tp')
+
+            output0 = RIFEMerge(
+                clipa=left_clip, clipb=right_clip, mask=tp_clip,
+                scale=scale, tiles=tiles, tilesize=tilesize, overlap=overlap,
+                model=model, backend=backend, ensemble=ensemble,
+                _implementation=_implementation
+            )
+
+            clip0 = bits_as(clip, output0)
+            left0 = bits_as(left_clip, output0)
+            output = core.akarin.Select([output0, left0], left0, 'x._SceneChangeNext 1 0 ?')
+            res = core.akarin.PickFrames(clip0 + output, output_indices)
+
+        if clip.fps_num != 0 and clip.fps_den != 0:
+            return res.std.AssumeFPS(fpsnum = dst_fps.numerator, fpsden = dst_fps.denominator)
+        else:
+            return res
 
 
 @enum.unique
