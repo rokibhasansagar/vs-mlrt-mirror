@@ -1015,7 +1015,7 @@ def RIFEMerge(
 
 def RIFE(
     clip: vs.VideoNode,
-    multi: typing.Union[int, Fraction] = 2,
+    multi: typing.Union[int, float, Fraction] = 2,
     scale: float = 1.0,
     tiles: typing.Optional[typing.Union[int, typing.Tuple[int, int]]] = None,
     tilesize: typing.Optional[typing.Union[int, typing.Tuple[int, int]]] = None,
@@ -1060,8 +1060,8 @@ def RIFE(
     if clip.format.color_family != vs.RGB:
         raise ValueError(f'{func_name}: "clip" must be of RGB color family')
 
-    if not isinstance(multi, (int, Fraction)):
-        raise TypeError(f'{func_name}: "multi" must be an integer or a fractions.Fraction!')
+    if not isinstance(multi, (int, float, Fraction)):
+        raise TypeError(f'{func_name}: "multi" must be an integer, a float or a fractions.Fraction!')
 
     if multi < 2:
         raise ValueError(f'{func_name}: RIFE: multi must be at least 2')
@@ -1119,6 +1119,16 @@ def RIFE(
         else:
             return res
     else:
+        if isinstance(multi,float):
+            multi=Fraction(multi)
+        if not hasattr(core, 'akarin') or \
+            not hasattr(core.akarin, 'PropExpr') or \
+            not hasattr(core.akarin, 'PickFrames'):
+            raise RuntimeError(
+                'fractional multi requires plugin akarin '
+                '(https://github.com/AkarinVS/vapoursynth-plugin/releases)'
+                ', version v0.96g or later.')
+
         if clip.fps_num == 0 or clip.fps_den == 0:
             src_fps = Fraction(1)
         else:
