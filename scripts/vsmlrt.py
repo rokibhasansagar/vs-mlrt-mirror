@@ -1,4 +1,4 @@
-__version__ = "3.15.43"
+__version__ = "3.15.45"
 
 __all__ = [
     "Backend", "BackendV2",
@@ -825,6 +825,7 @@ class RIFEModel(enum.IntEnum):
     v4_12_lite = 4121
     v4_13 = 413
     v4_13_lite = 4131
+    v4_14 = 414
 
 
 def RIFEMerge(
@@ -1239,6 +1240,9 @@ def RIFE(
 @enum.unique
 class SAFAModel(enum.IntEnum):
     v0_1 = 1
+    v0_2 = 2
+    v0_3 = 3
+    v0_4 = 4
 
 
 @enum.unique
@@ -1281,7 +1285,11 @@ def SAFA(
     else:
         overlap_w, overlap_h = overlap
 
-    multiple = 1
+    # unknown crash
+    if model <= 2:
+        multiple = 8
+    else:
+        multiple = 16
 
     (tile_w, tile_h), (overlap_w, overlap_h) = calc_tilesize(
         tiles=tiles, tilesize=tilesize,
