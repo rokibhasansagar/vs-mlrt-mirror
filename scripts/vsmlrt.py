@@ -1,4 +1,4 @@
-__version__ = "3.15.46"
+__version__ = "3.15.55"
 
 __all__ = [
     "Backend", "BackendV2",
@@ -33,15 +33,18 @@ def get_plugins_path() -> str:
     path = b""
 
     try:
-        path = core.trt.Version()["path"]
+        path = core.ov.Version()["path"]
     except AttributeError:
         try:
             path = core.ort.Version()["path"]
         except AttributeError:
             try:
-                path = core.ov.Version()["path"]
-            except AttributeError:
                 path = core.ncnn.Version()["path"]
+            except AttributeError:
+                try:
+                    path = core.trt.Version()["path"]
+                except AttributeError:
+                    path = core.migx.Version()["path"]
 
     assert path != b""
 
@@ -49,6 +52,7 @@ def get_plugins_path() -> str:
 
 plugins_path: str = get_plugins_path()
 trtexec_path: str = os.path.join(plugins_path, "vsmlrt-cuda", "trtexec")
+migraphx_driver_path: str = os.path.join(plugins_path, "vsmlrt-hip", "migraphx-driver")
 models_path: str = os.path.join(plugins_path, "models")
 
 
@@ -189,6 +193,26 @@ class Backend:
         # internal backend attributes
         supports_onnx_serialization: bool = True
 
+    @dataclass(frozen=False)
+    class MIGX:
+        """ backend for amd gpus
+
+        basic performance tuning:
+        set fp16 = True
+        """
+
+        device_id: int = 0
+        fp16: bool = False
+        opt_shapes: typing.Optional[typing.Tuple[int, int]] = None
+        fast_math: bool = True
+        exhaustive_tune: bool = False
+
+        custom_env: typing.Dict[str, str] = field(default_factory=lambda: {})
+        custom_args: typing.List[str] = field(default_factory=lambda: [])
+
+        # internal backend attributes
+        supports_onnx_serialization: bool = False
+
 
 backendT = typing.Union[
     Backend.OV_CPU,
@@ -198,6 +222,7 @@ backendT = typing.Union[
     Backend.OV_GPU,
     Backend.NCNN_VK,
     Backend.ORT_DML,
+    Backend.MIGX
 ]
 
 
@@ -226,7 +251,7 @@ def Waifu2x(
     tiles: typing.Optional[typing.Union[int, typing.Tuple[int, int]]] = None,
     tilesize: typing.Optional[typing.Union[int, typing.Tuple[int, int]]] = None,
     overlap: typing.Optional[typing.Union[int, typing.Tuple[int, int]]] = None,
-    model: typing.Literal[0, 1, 2, 3, 4, 5, 6, 7, 8, 9] = 6,
+    model: Waifu2xModel = Waifu2xModel.cunet,
     backend: backendT = Backend.TRT(),
     preprocess: bool = True
 ) -> vs.VideoNode:
@@ -395,7 +420,7 @@ def DPIR(
     tiles: typing.Optional[typing.Union[int, typing.Tuple[int, int]]] = None,
     tilesize: typing.Optional[typing.Union[int, typing.Tuple[int, int]]] = None,
     overlap: typing.Optional[typing.Union[int, typing.Tuple[int, int]]] = None,
-    model: typing.Literal[0, 1, 2, 3] = 0,
+    model: DPIRModel = DPIRModel.drunet_gray,
     backend: backendT = Backend.TRT()
 ) -> vs.VideoNode:
 
@@ -490,6 +515,10 @@ class RealESRGANModel(enum.IntEnum):
     animejanaiV2L1 = 5005
     animejanaiV2L2 = 5006
     animejanaiV2L3 = 5007
+    # contributed: janaiV3-hd(2x) https://github.com/the-database/mpv-upscale-2x_animejanai/releases/tag/3.0.0 maintainer: hooke007
+    animejanaiV3_HD_L1 = 5008
+    animejanaiV3_HD_L2 = 5009
+    animejanaiV3_HD_L3 = 5010
 
 RealESRGANv2Model = RealESRGANModel
 
@@ -499,7 +528,7 @@ def RealESRGAN(
     tiles: typing.Optional[typing.Union[int, typing.Tuple[int, int]]] = None,
     tilesize: typing.Optional[typing.Union[int, typing.Tuple[int, int]]] = None,
     overlap: typing.Optional[typing.Union[int, typing.Tuple[int, int]]] = None,
-    model: RealESRGANv2Model = 0,
+    model: RealESRGANv2Model = RealESRGANv2Model.animevideo_xsx2,
     backend: backendT = Backend.TRT(),
     scale: typing.Optional[float] = None
 ) -> vs.VideoNode:
@@ -551,7 +580,7 @@ def RealESRGAN(
             "RealESRGANv2",
             "realesr-animevideov3.onnx"
         )
-    elif model in [5005, 5006, 5007]:
+    elif model in [5005, 5006, 5007, 5008, 5009, 5010]:
         network_path = os.path.join(
             models_path,
             "RealESRGANv2",
@@ -592,7 +621,6 @@ def CUGAN(
     tilesize: typing.Optional[typing.Union[int, typing.Tuple[int, int]]] = None,
     overlap: typing.Optional[typing.Union[int, typing.Tuple[int, int]]] = None,
     backend: backendT = Backend.TRT(),
-    preprocess: bool = True,
     alpha: float = 1.0,
     version: typing.Literal[1, 2] = 1, # 1: legacy, 2: pro
     conformance: bool = True # currently specifies dynamic range compression for cugan-pro
@@ -636,8 +664,6 @@ def CUGAN(
         overlap_w, overlap_h = overlap
 
     multiple = 2
-
-    width, height = clip.width, clip.height
 
     (tile_w, tile_h), (overlap_w, overlap_h) = calc_tilesize(
         tiles=tiles, tilesize=tilesize,
@@ -827,6 +853,9 @@ class RIFEModel(enum.IntEnum):
     v4_13_lite = 4131
     v4_14 = 414
     v4_14_lite = 4141
+    v4_15 = 415
+    v4_15_lite = 4151
+    v4_16_lite = 4161
 
 
 def RIFEMerge(
@@ -1437,7 +1466,7 @@ def trtexec(
 ) -> str:
 
     # tensort runtime version, e.g. 8401 => 8.4.1
-    trt_version = int(core.trt.Version()["tensorrt_version"])
+    trt_version = parse_trt_version(int(core.trt.Version()["tensorrt_version"]))
 
     if isinstance(opt_shapes, int):
         opt_shapes = (opt_shapes, opt_shapes)
@@ -1498,7 +1527,7 @@ def trtexec(
     ]
 
     if workspace is not None:
-        if trt_version >= 8400:
+        if trt_version >= (8, 4, 0):
             args.append(f"--memPoolSize=workspace:{workspace}")
         else:
             args.append(f"--workspace{workspace}")
@@ -1523,9 +1552,9 @@ def trtexec(
         disabled_tactic_sources.extend(["-CUBLAS", "-CUBLAS_LT"])
     if not use_cudnn:
         disabled_tactic_sources.append("-CUDNN")
-    if not use_edge_mask_convolutions and trt_version >= 8401:
+    if not use_edge_mask_convolutions and trt_version >= (8, 4, 1):
         disabled_tactic_sources.append("-EDGE_MASK_CONVOLUTIONS")
-    if not use_jit_convolutions and trt_version >= 8500:
+    if not use_jit_convolutions and trt_version >= (8, 5, 0):
         disabled_tactic_sources.append("-JIT_CONVOLUTIONS")
     if disabled_tactic_sources:
         args.append(f"--tacticSources={','.join(disabled_tactic_sources)}")
@@ -1544,8 +1573,8 @@ def trtexec(
     if not tf32:
         args.append("--noTF32")
 
-    if heuristic and trt_version >= 8500 and core.trt.DeviceProperties(device_id)["major"] >= 8:
-        if trt_version < 8600:
+    if heuristic and trt_version >= (8, 5, 0) and core.trt.DeviceProperties(device_id)["major"] >= 8:
+        if trt_version < (8, 6, 0):
             args.append("--heuristic")
         else:
             builder_optimization_level = 2
@@ -1555,11 +1584,11 @@ def trtexec(
         "--outputIOFormats=fp32:chw" if output_format == 0 else "--outputIOFormats=fp16:chw"
     ])
 
-    if faster_dynamic_shapes and not static_shape and 8500 <= trt_version < 8600:
+    if faster_dynamic_shapes and not static_shape and (8, 5, 0) <= trt_version < (8, 6, 0):
         args.append("--preview=+fasterDynamicShapes0805")
 
     if force_fp16:
-        if trt_version >= 8401:
+        if trt_version >= (8, 4, 1):
             args.extend([
                 "--layerPrecisions=*:fp16",
                 "--layerOutputTypes=*:fp16",
@@ -1568,7 +1597,7 @@ def trtexec(
         else:
             raise ValueError('"force_fp16" is not available')
 
-    if trt_version >= 8600:
+    if trt_version >= (8, 6, 0):
         args.append(f"--builderOptimizationLevel={builder_optimization_level}")
 
     args.extend(custom_args)
@@ -1612,6 +1641,122 @@ def trtexec(
         subprocess.run(args, env=env, check=True, stdout=sys.stderr)
 
     return engine_path
+
+
+def get_mxr_path(
+    network_path: str,
+    opt_shapes: typing.Tuple[int, int],
+    fp16: bool,
+    fast_math: bool,
+    exhaustive_tune: bool,
+    device_id: int
+) -> str:
+
+    with open(network_path, "rb") as file:
+        checksum = zlib.adler32(file.read())
+
+    migx_version = core.migx.Version()["migraphx_version_build"].decode()
+
+    try:
+        device_name = core.migx.DeviceProperties(device_id)["name"].decode()
+        device_name = device_name.replace(' ', '-')
+    except AttributeError:
+        device_name = f"device{device_id}"
+
+    shape_str = f"{opt_shapes[0]}x{opt_shapes[1]}"
+
+    identity = (
+        shape_str +
+        ("_fp16" if fp16 else "") +
+        ("_fast" if fast_math else "") +
+        ("_exhaustive" if exhaustive_tune else "") +
+        f"_migx-{migx_version}" +
+        f"_{device_name}" +
+        f"_{checksum:x}"
+    )
+
+    return f"{network_path}.{identity}.mxr"
+
+
+def migraphx_driver(
+    network_path: str,
+    channels: int,
+    opt_shapes: typing.Tuple[int, int],
+    fp16: bool,
+    fast_math: bool,
+    exhaustive_tune: bool,
+    device_id: int,
+    input_name: str = "input",
+    custom_env: typing.Dict[str, str] = {},
+    custom_args: typing.List[str] = []
+) -> str:
+
+    if isinstance(opt_shapes, int):
+        opt_shapes = (opt_shapes, opt_shapes)
+
+    mxr_path = get_mxr_path(
+        network_path=network_path,
+        opt_shapes=opt_shapes,
+        fp16=fp16,
+        fast_math=fast_math,
+        exhaustive_tune=exhaustive_tune,
+        device_id=device_id
+    )
+
+    if os.access(mxr_path, mode=os.R_OK):
+        return mxr_path
+
+    alter_mxr_path = os.path.join(
+        tempfile.gettempdir(),
+        os.path.splitdrive(mxr_path)[1][1:]
+    )
+
+    if os.access(alter_mxr_path, mode=os.R_OK):
+        return alter_mxr_path
+
+    try:
+        # test writability
+        with open(mxr_path, "w") as f:
+            pass
+        os.remove(mxr_path)
+    except PermissionError:
+        print(f"{mxr_path} not writable", file=sys.stderr)
+        mxr_path = alter_mxr_path
+        dirname = os.path.dirname(mxr_path)
+        if not os.path.exists(dirname):
+            os.makedirs(dirname)
+        print(f"change mxr path to {mxr_path}", file=sys.stderr)
+
+    if device_id != 0:
+        raise ValueError('"device_id" must be 0')
+
+    args = [
+        migraphx_driver_path,
+        "compile",
+        "--onnx", f"{network_path}",
+        "--gpu",
+        # f"--device={device_id}",
+        "--optimize",
+        "--binary",
+        "--output", f"{mxr_path}"
+    ]
+
+    args.extend(["--input-dim", f"@{input_name}", "1", f"{channels}", f"{opt_shapes[1]}", f"{opt_shapes[0]}"])
+
+    if fp16:
+        args.append("--fp16")
+
+    if not fast_math:
+        args.append("--disable-fast-math")
+
+    if exhaustive_tune:
+        args.append("--exhaustive-tune")
+
+    args.extend(custom_args)
+
+    subprocess.run(args, env=custom_env, check=True, stdout=sys.stderr)
+
+    return mxr_path
 
 
 def calc_size(width: int, tiles: int, overlap: int, multiple: int = 1) -> int:
@@ -1668,6 +1813,8 @@ def init_backend(
         backend = Backend.NCNN_VK()
     elif backend is Backend.ORT_DML: # type: ignore
         backend = Backend.ORT_DML()
+    elif backend is Backend.MIGX: # type: ignore
+        backend = Backend.MIGX()
 
     backend = copy.deepcopy(backend)
 
@@ -1677,6 +1824,9 @@ def init_backend(
 
         if backend.max_shapes is None:
             backend.max_shapes = backend.opt_shapes
+    elif isinstance(backend, Backend.MIGX):
+        if backend.opt_shapes is None:
+            backend.opt_shapes = trt_opt_shapes
 
     return backend
 
@@ -1826,6 +1976,34 @@ def _inference(
             builtin=False,
             fp16=backend.fp16,
             path_is_serialization=path_is_serialization,
+        )
+    elif isinstance(backend, Backend.MIGX):
+        if path_is_serialization:
+            raise ValueError('"path_is_serialization" must be False for migx backend')
+
+        network_path = typing.cast(str, network_path)
+
+        channels = sum(clip.format.num_planes for clip in clips)
+
+        opt_shapes = backend.opt_shapes if backend.opt_shapes is not None else tilesize
+
+        mxr_path = migraphx_driver(
+            network_path,
+            channels=channels,
+            opt_shapes=opt_shapes,
+            fp16=backend.fp16,
+            fast_math=backend.fast_math,
+            exhaustive_tune=backend.exhaustive_tune,
+            device_id=backend.device_id,
+            input_name=input_name,
+            custom_env=backend.custom_env,
+            custom_args=backend.custom_args
+        )
+        clip = core.migx.Model(
+            clips, mxr_path,
+            overlap=overlap,
+            tilesize=tilesize,
+            device_id=backend.device_id
         )
     else:
         raise TypeError(f'unknown backend {backend}')
@@ -2043,6 +2221,19 @@ class BackendV2:
             **kwargs
         )
 
+    @staticmethod
+    def MIGX(*,
+        fp16: bool = False,
+        opt_shapes: typing.Optional[typing.Tuple[int, int]] = None,
+        **kwargs
+    ) -> Backend.MIGX:
+
+        return Backend.MIGX(
+            fp16=fp16,
+            opt_shapes=opt_shapes
+            **kwargs
+        )
+
 
 def fmtc_resample(clip: vs.VideoNode, **kwargs) -> vs.VideoNode:
     clip_org = clip
@@ -2057,3 +2248,11 @@ def fmtc_resample(clip: vs.VideoNode, **kwargs) -> vs.VideoNode:
         clip = core.resize.Point(clip, format=clip_org.format)
 
     return clip
+
+
+def parse_trt_version(version: int) -> typing.Tuple[int, int, int]:
+    # before trt 10
+    if version < 10000:
+        return version // 1000, (version // 100) % 10, version % 100
+    else:
+        return version // 10000, (version // 100) % 100, version % 100
