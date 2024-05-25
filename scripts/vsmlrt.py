@@ -163,11 +163,13 @@ class Backend:
         force_fp16: bool = False
         builder_optimization_level: int = 3
         max_aux_streams: typing.Optional[int] = None
-        short_path: typing.Optional[bool] = None # True on Windows by default, False otherwise
+        short_path: typing.Optional[bool] = False
         bf16: bool = False
         custom_env: typing.Dict[str, str] = field(default_factory=lambda: {})
         custom_args: typing.List[str] = field(default_factory=lambda: [])
         engine_folder: typing.Optional[str] = None
+
+        timing_cache: typing.Optional[typing.Union[str,bool]] = r'D:\vstrt.cache'
 
         # internal backend attributes
         supports_onnx_serialization: bool = False
@@ -909,7 +911,7 @@ def RIFEMerge(
     tilesize: typing.Optional[typing.Union[int, typing.Tuple[int, int]]] = None,
     overlap: typing.Optional[typing.Union[int, typing.Tuple[int, int]]] = None,
     model: RIFEModel = RIFEModel.v4_4,
-    backend: backendT = Backend.OV_CPU(),
+    backend: backendT = Backend.TRT(),
     ensemble: bool = False,
     _implementation: typing.Optional[typing.Literal[1, 2]] = None
 ) -> vs.VideoNode:
@@ -1097,7 +1099,7 @@ def RIFE(
     tilesize: typing.Optional[typing.Union[int, typing.Tuple[int, int]]] = None,
     overlap: typing.Optional[typing.Union[int, typing.Tuple[int, int]]] = None,
     model: RIFEModel = RIFEModel.v4_4,
-    backend: backendT = Backend.OV_CPU(),
+    backend: backendT = Backend.TRT(),
     ensemble: bool = False,
     video_player: bool = False,
     _implementation: typing.Optional[typing.Literal[1, 2]] = None
@@ -1801,22 +1803,10 @@ def get_engine_path(
         os.makedirs(engine_folder, exist_ok=True)
         dirname = engine_folder
 
-    use_short_path = False
-
-    if short_path:
-        use_short_path = True
-    elif platform.system() == "Windows":
-        # use short path by default
-        if short_path is None:
-            use_short_path = True
-        # NTFS limitation
-        elif len(f"{basename}.{identity}.engine.cache.lock") >= 256:
-            use_short_path = True
-
-    if use_short_path:
-        return os.path.join(dirname, f"{zlib.crc32((f'{basename}.{identity}').encode()):x}.engine")
-    else:
-        return f"{os.path.join(dirname, basename)}.{identity}.engine"
+    return (
+        f"{os.path.join(dirname, basename)}.{identity}.engine",
+        os.path.join(dirname, f"{zlib.crc32((basename + identity).encode()):x}.engine")
+    )
 
 
 def trtexec(
@@ -1848,6 +1838,7 @@ def trtexec(
     short_path: typing.Optional[bool] = None,
     bf16: bool = False,
     custom_env: typing.Dict[str, str] = {},
+    timing_cache: str = None,
     custom_args: typing.List[str] = [],
     engine_folder: typing.Optional[str] = None
 ) -> str:
@@ -1866,7 +1857,7 @@ def trtexec(
         tf32 = False
         bf16 = False
 
-    engine_path = get_engine_path(
+    engine_paths = get_engine_path(
         network_path=network_path,
         min_shapes=min_shapes,
         opt_shapes=opt_shapes,
@@ -1886,6 +1877,27 @@ def trtexec(
         bf16=bf16,
         engine_folder=engine_folder,
     )
+
+    use_short_path = False
+
+    if short_path:
+        use_short_path = True
+    # limitation of Windows: 256 characters, Linux: 255 bytes
+    elif len(os.path.split(engine_paths[0])[1].encode()) >= 255:
+        use_short_path = True
+    elif platform.system() == "Windows":
+        # use short path by default
+        if short_path is None:
+            use_short_path = True
+
+    if use_short_path:
+        engine_path = engine_paths[1]
+    else:
+        engine_path = engine_paths[0]
+
+    if trt_version < (10, 0, 0):
+        if len(engine_path) > 255 and platform.system() == "Windows":
+            raise ValueError("Engine path will exceed windows limit, try use short_path.")
 
     if os.access(engine_path, mode=os.R_OK):
         return engine_path
@@ -1920,10 +1932,14 @@ def trtexec(
     args = [
         trtexec_path,
         f"--onnx={network_path}",
-        f"--timingCacheFile=D:\\vstrt.cache",
         f"--device={device_id}",
         f"--saveEngine={engine_path}"
     ]
+
+    if isinstance(timing_cache, str):
+        args.append(f"--timingCacheFile={timing_cache}")
+    elif timing_cache is None or timing_cache is True:
+        args.append(f"--timingCacheFile={network_path}.cache")
 
     if workspace is not None:
         if trt_version >= (8, 4, 0):
@@ -1984,11 +2000,11 @@ def trtexec(
             "--useCudaGraph",
             "--noDataTransfers"
         ))
+
+    if trt_version >= (8, 6, 0):
+        args.append("--skipInference")
     else:
-        if trt_version >= (8, 6, 0):
-            args.append("--skipInference")
-        else:
-            args.append("--buildOnly")
+        args.append("--buildOnly")
 
     if not tf32:
         args.append("--noTF32")
@@ -2066,6 +2082,10 @@ def trtexec(
         env = {"CUDA_MODULE_LOADING": "LAZY"}
         env.update(**custom_env)
         subprocess.run(args, env=env, check=True, stdout=sys.stderr)
+
+    if use_short_path:
+        with open(engine_path[:-7]+".txt", "w") as desc:
+            desc.write(os.path.split(engine_paths[0])[-1])
 
     return engine_path
 
@@ -2442,6 +2462,7 @@ def _inference(
             short_path=backend.short_path,
             bf16=backend.bf16,
             custom_env=backend.custom_env,
+            timing_cache=backend.timing_cache,
             custom_args=backend.custom_args,
             engine_folder=backend.engine_folder,
         )
