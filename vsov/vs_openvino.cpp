@@ -20,28 +20,17 @@
 #include <onnx/common/version.h>
 #include <onnx/onnx_pb.h>
 
-#include <ie_core.hpp>
+#include <openvino/openvino.hpp>
 #include <openvino/pass/constant_folding.hpp>
 
 #ifdef ENABLE_VISUALIZATION
 #include <openvino/pass/visualize_tree.hpp>
 #endif // ENABLE_VISUALIZATION
 
+#include "../common/convert_float_to_float16.h"
+#include "../common/onnx_utils.h"
+
 #include "config.h"
-
-
-extern std::variant<std::string, ONNX_NAMESPACE::ModelProto> loadONNX(
-    const std::string_view & path,
-    int64_t tile_w,
-    int64_t tile_h,
-    bool path_is_serialization
-) noexcept;
-
-extern void convert_float_to_float16(
-    ONNX_NAMESPACE::ModelProto & model,
-    bool force_fp16_initializers,
-    const std::unordered_set<std::string> & op_block_list
-) noexcept;
 
 
 using namespace std::string_literals;
@@ -50,16 +39,16 @@ static const VSPlugin * myself = nullptr;
 
 
 static std::array<int, 4> getShape(
-    const InferenceEngine::ExecutableNetwork & network,
+    const ov::CompiledModel & network,
     bool input
 ) {
 
-    InferenceEngine::SizeVector dims;
+    ov::Shape dims;
 
     if (input) {
-        dims = network.GetInputsInfo().cbegin()->second->getTensorDesc().getDims();
+        dims = network.input().get_shape();
     } else {
-        dims = network.GetOutputsInfo().cbegin()->second->getTensorDesc().getDims();
+        dims = network.output().get_shape();
     }
 
     std::array<int, 4> ret;
@@ -112,21 +101,20 @@ static std::optional<std::string> checkNodes(
 }
 
 
-template <typename T>
 [[nodiscard]]
 static std::optional<std::string> checkIOInfo(
-    const T & info,
-    bool is_output
+    const ov::Output<ov::Node> & info,
+    bool is_output,
+    bool flexible_output
 ) {
 
-    if (info->getPrecision() != InferenceEngine::Precision::FP32) {
+    if (info.get_element_type() != ov::element::f32) {
         return "expects network IO with type fp32";
     }
-    const auto & desc = info->getTensorDesc();
-    if (desc.getLayout() != InferenceEngine::Layout::NCHW) {
-        return "expects network IO with layout NCHW";
-    }
-    const auto & dims = desc.getDims();
+    // if (ov::layout::get_layout(info) != ov::Layout("NCHW")) {
+    //     return "expects network IO with layout NCHW";
+    // }
+    const auto & dims = info.get_shape();
     if (dims.size() != 4) {
         return "expects network with 4-D IO";
     }
@@ -137,8 +125,8 @@ static std::optional<std::string> checkIOInfo(
 
     if (is_output) {
         auto out_channels = dims[1];
-        if (out_channels != 1 && out_channels != 3) {
-            return "output dimensions must be 1 or 3";
+        if (out_channels != 1 && out_channels != 3 && !flexible_output) {
+            return "output dimensions must be 1 or 3, or enable \"flexible_output\"";
         }
     }
 
@@ -148,28 +136,25 @@ static std::optional<std::string> checkIOInfo(
 
 [[nodiscard]]
 static std::optional<std::string> checkNetwork(
-    const InferenceEngine::CNNNetwork & network
+    const std::shared_ptr<ov::Model> & network,
+    bool flexible_output
 ) {
 
-    const auto & inputs_info = network.getInputsInfo();
-
-    if (auto num_inputs = std::size(inputs_info); num_inputs != 1) {
+    if (auto num_inputs = std::size(network->inputs()); num_inputs != 1) {
         return "network input count must be 1, got " + std::to_string(num_inputs);
     }
 
-    const auto & input_info = inputs_info.cbegin()->second;
-    if (auto err = checkIOInfo(input_info, false); err.has_value()) {
+    const auto & input_info = network->input();
+    if (auto err = checkIOInfo(input_info, false, flexible_output); err.has_value()) {
         return err.value();
     }
 
-    const auto & outputs_info = network.getOutputsInfo();
-
-    if (auto num_outputs = std::size(outputs_info); num_outputs != 1) {
+    if (auto num_outputs = std::size(network->outputs()); num_outputs != 1) {
         return "network output count must be 1, got " + std::to_string(num_outputs);
     }
 
-    const auto & output_info = outputs_info.cbegin()->second;
-    if (auto err = checkIOInfo(output_info, true); err.has_value()) {
+    const auto & output_info = network->output();
+    if (auto err = checkIOInfo(output_info, true, flexible_output); err.has_value()) {
         return err.value();
     }
 
@@ -179,12 +164,12 @@ static std::optional<std::string> checkNetwork(
 
 [[nodiscard]]
 static std::optional<std::string> checkNodesAndNetwork(
-    const InferenceEngine::ExecutableNetwork & network,
+    const ov::CompiledModel & network,
     const std::vector<const VSVideoInfo *> & vis
 ) {
 
     const auto & network_in_dims = (
-        network.GetInputsInfo().cbegin()->second->getTensorDesc().getDims()
+        network.input().get_tensor().get_shape()
     );
 
     int network_in_channels = static_cast<int>(network_in_dims[1]);
@@ -205,20 +190,22 @@ static std::optional<std::string> checkNodesAndNetwork(
 }
 
 
+
 static void setDimensions(
     std::unique_ptr<VSVideoInfo> & vi,
-    const InferenceEngine::ExecutableNetwork & network,
+    const ov::CompiledModel & network,
     VSCore * core,
-    const VSAPI * vsapi
+    const VSAPI * vsapi,
+    bool flexible_output
 ) {
 
-    auto in_dims = network.GetInputsInfo().cbegin()->second->getTensorDesc().getDims();
-    auto out_dims = network.GetOutputsInfo().cbegin()->second->getTensorDesc().getDims();
+    const auto & in_dims = network.input().get_shape();
+    const auto & out_dims = network.output().get_shape();
 
     vi->height *= out_dims[2] / in_dims[2];
     vi->width *= out_dims[3] / in_dims[3];
 
-    if (out_dims[1] == 1) {
+    if (out_dims[1] == 1 || flexible_output) {
         vi->format = vsapi->registerFormat(cmGray, stFloat, 32, 0, 0, core);
     } else if (out_dims[1] == 3) {
         vi->format = vsapi->registerFormat(cmRGB, stFloat, 32, 0, 0, core);
@@ -226,13 +213,13 @@ static void setDimensions(
 }
 
 
-static std::variant<std::string, std::map<std::string, std::string>> getConfig(
+static std::variant<std::string, ov::AnyMap> getConfig(
     VSFuncRef * config_func,
     VSCore * core,
     const VSAPI * vsapi
 ) {
 
-    std::map<std::string, std::string> config;
+    ov::AnyMap config;
 
     if (config_func == nullptr) {
         return config;
@@ -285,13 +272,12 @@ struct OVData {
 
     int overlap_w, overlap_h;
 
-    InferenceEngine::Core core;
-    InferenceEngine::ExecutableNetwork executable_network;
-    std::unordered_map<std::thread::id, InferenceEngine::InferRequest> infer_requests;
+    ov::Core core;
+    ov::CompiledModel executable_network;
+    std::unordered_map<std::thread::id, ov::InferRequest> infer_requests;
     std::shared_mutex infer_requests_lock;
 
-    std::string input_name;
-    std::string output_name;
+    std::string flexible_output_prop;
 };
 
 
@@ -363,6 +349,9 @@ static const VSFrameRef *VS_CC vsOvGetFrame(
             d->out_vi->format, d->out_vi->width, d->out_vi->height,
             src_frames.front(), core
         );
+
+        std::vector<VSFrameRef *> dst_frames;
+
         auto dst_stride = vsapi->getStride(dst_frame, 0);
         auto dst_bytes = vsapi->getFrameFormat(dst_frame)->bytesPerSample;
         auto dst_tile_shape = getShape(d->executable_network, false);
@@ -371,9 +360,21 @@ static const VSFrameRef *VS_CC vsOvGetFrame(
         auto dst_tile_w_bytes = dst_tile_w * dst_bytes;
         auto dst_tile_bytes = dst_tile_h * dst_tile_w_bytes;
         auto dst_planes = dst_tile_shape[1];
-        std::array<uint8_t *, 3> dst_ptrs {};
-        for (int i = 0; i < dst_planes; ++i) {
-            dst_ptrs[i] = vsapi->getWritePtr(dst_frame, i);
+
+        std::vector<uint8_t *> dst_ptrs;
+        if (d->flexible_output_prop.empty()) {
+            for (int i = 0; i < dst_planes; ++i) {
+                dst_ptrs.emplace_back(vsapi->getWritePtr(dst_frame, i));
+            }
+        } else {
+            for (int i = 0; i < dst_planes; ++i) {
+                auto frame { vsapi->newVideoFrame(
+                    d->out_vi->format, d->out_vi->width, d->out_vi->height,
+                    src_frames[0], core
+                )};
+                dst_frames.emplace_back(frame);
+                dst_ptrs.emplace_back(vsapi->getWritePtr(frame, 0));
+            }
         }
 
         auto h_scale = dst_tile_h / src_tile_h;
@@ -387,6 +388,10 @@ static const VSFrameRef *VS_CC vsOvGetFrame(
 
             vsapi->freeFrame(dst_frame);
 
+            for (const auto & frame : dst_frames) {
+                vsapi->freeFrame(frame);
+            }
+
             for (const auto & frame : src_frames) {
                 vsapi->freeFrame(frame);
             }
@@ -396,7 +401,7 @@ static const VSFrameRef *VS_CC vsOvGetFrame(
 
         auto thread_id = std::this_thread::get_id();
         bool initialized = true;
-        InferenceEngine::InferRequest * infer_request;
+        ov::InferRequest * infer_request;
 
         d->infer_requests_lock.lock_shared();
         try {
@@ -409,9 +414,9 @@ static const VSFrameRef *VS_CC vsOvGetFrame(
         if (!initialized) {
             std::lock_guard _ { d->infer_requests_lock };
             try {
-                d->infer_requests.emplace(thread_id, d->executable_network.CreateInferRequest());
-            } catch (const InferenceEngine::Exception& e) {
-                return set_error("[IE exception] Create inference request: "s + e.what());
+                d->infer_requests.emplace(thread_id, d->executable_network.create_infer_request());
+            } catch (const ov::Exception & e) {
+                return set_error("[OV exception] Create inference request: "s + e.what());
             } catch (const std::exception& e) {
                 return set_error("[Standard exception] Create inference request: "s + e.what());
             }
@@ -429,11 +434,7 @@ static const VSFrameRef *VS_CC vsOvGetFrame(
                 int x_crop_end = (x == src_width - src_tile_w) ? 0 : d->overlap_w;
 
                 {
-                    InferenceEngine::Blob::Ptr input = infer_request->GetBlob(d->input_name);
-
-                    auto minput = input->as<InferenceEngine::MemoryBlob>();
-                    auto minputHolder = minput->wmap();
-                    uint8_t * input_buffer = minputHolder.as<uint8_t *>();
+                    auto input_buffer = (uint8_t *) infer_request->get_input_tensor().data<float>();
 
                     for (const auto & _src_ptr : src_ptrs) {
                         const uint8_t * src_ptr { _src_ptr +
@@ -451,19 +452,15 @@ static const VSFrameRef *VS_CC vsOvGetFrame(
                 }
 
                 try {
-                    infer_request->Infer();
-                } catch (const InferenceEngine::Exception & e) {
-                    return set_error("[IE exception] Create inference request: "s + e.what());
+                    infer_request->infer();
+                } catch (const ov::Exception & e) {
+                    return set_error("[OV exception] Create inference request: "s + e.what());
                 } catch (const std::exception& e) {
                     return set_error("[Standard exception] Create inference request: "s + e.what());
                 }
 
                 {
-                    InferenceEngine::Blob::CPtr output = infer_request->GetBlob(d->output_name);
-
-                    auto moutput = output->as<const InferenceEngine::MemoryBlob>();
-                    auto moutputHolder = moutput->rmap();
-                    const uint8_t * output_buffer = moutputHolder.as<const uint8_t *>();
+                    auto output_buffer = (const uint8_t *) infer_request->get_output_tensor().data<float>();
 
                     for (int plane = 0; plane < dst_planes; ++plane) {
                         uint8_t * dst_ptr = (dst_ptrs[plane] +
@@ -501,6 +498,16 @@ static const VSFrameRef *VS_CC vsOvGetFrame(
             vsapi->freeFrame(frame);
         }
 
+        if (!d->flexible_output_prop.empty()) {
+            auto prop = vsapi->getFramePropsRW(dst_frame);
+
+            for (int i = 0; i < dst_planes; i++) {
+                auto key { d->flexible_output_prop + std::to_string(i) };
+                vsapi->propSetFrame(prop, key.c_str(), dst_frames[i], paReplace);
+                vsapi->freeFrame(dst_frames[i]);
+            }
+        }
+
         return dst_frame;
     }
 
@@ -533,11 +540,11 @@ static void VS_CC vsOvCreate(
 ) {
 
     std::unique_ptr<OVData> d = nullptr;
-    
+
     try {
         d = std::make_unique<OVData>();
-    } catch (const InferenceEngine::Exception& e) {
-        vsapi->setError(out, ("[IE exception] Initialize inference engine: "s + e.what()).c_str());
+    } catch (const ov::Exception& e) {
+        vsapi->setError(out, ("[OV exception] Initialize inference engine: "s + e.what()).c_str());
         return ;
     } catch (const std::exception& e) {
         vsapi->setError(out, ("[Standard exception] Initialize inference engine: "s + e.what()).c_str());
@@ -642,6 +649,11 @@ static void VS_CC vsOvCreate(
         path_view = path;
     }
 
+    auto flexible_output_prop = vsapi->propGetData(in, "flexible_output_prop", 0, &error);
+    if (!error) {
+        d->flexible_output_prop = flexible_output_prop;
+    }
+
     auto result = loadONNX(path_view, tile_w, tile_h, path_is_serialization);
     if (std::holds_alternative<std::string>(result)) {
         return set_error(std::get<std::string>(result));
@@ -675,24 +687,21 @@ static void VS_CC vsOvCreate(
     }
 
     {
-        InferenceEngine::CNNNetwork network;
+        std::shared_ptr<ov::Model> network;
         try {
-            auto empty = InferenceEngine::Blob::CPtr();
-            network = d->core.ReadNetwork(onnx_data, empty);
-        } catch (const InferenceEngine::Exception& e) {
-            return set_error("[IE exception] ReadNetwork(): "s + e.what());
+            network = d->core.read_model(onnx_data, ov::Tensor());
+        } catch (const ov::Exception& e) {
+            return set_error("[OV exception] ReadNetwork(): "s + e.what());
         } catch (const std::exception& e) {
             return set_error("[Standard exception] ReadNetwork(): "s + e.what());
         }
 
-        if (auto err = checkNetwork(network); err.has_value()) {
+        if (auto err = checkNetwork(network, !d->flexible_output_prop.empty()); err.has_value()) {
             return set_error(err.value());
         }
 
-        auto function = network.getFunction(); // mutable
-
         try {
-            ov::pass::ConstantFolding().run_on_model(function);
+            ov::pass::ConstantFolding().run_on_model(network);
         } catch (const ov::Exception & e) {
             return set_error(e.what());
         }
@@ -701,7 +710,7 @@ static void VS_CC vsOvCreate(
         const char * dot_path = vsapi->propGetData(in, "dot_path", 0, &error);
         if (!error) {
             try {
-                ov::pass::VisualizeTree(dot_path, nullptr, true).run_on_model(function);
+                ov::pass::VisualizeTree(dot_path, nullptr, true).run_on_model(network);
             } catch (const ov::Exception & e) {
                 return set_error(e.what());
             }
@@ -714,11 +723,11 @@ static void VS_CC vsOvCreate(
         if (std::holds_alternative<std::string>(config_ret)) {
             return set_error(std::get<std::string>(config_ret));
         }
-        auto & config = std::get<std::map<std::string, std::string>>(config_ret);
+        auto & config = std::get<ov::AnyMap>(config_ret);
 
         try {
-            d->executable_network = d->core.LoadNetwork(network, device, config);
-        } catch (const InferenceEngine::Exception & e) {
+            d->executable_network = d->core.compile_model(network, device, config);
+        } catch (const ov::Exception & e) {
             return set_error(e.what());
         }
 
@@ -726,14 +735,16 @@ static void VS_CC vsOvCreate(
             return set_error(err.value());
         }
 
-        setDimensions(d->out_vi, d->executable_network, core, vsapi);
-
-        d->input_name = d->executable_network.GetInputsInfo().cbegin()->first;
-        d->output_name = d->executable_network.GetOutputsInfo().cbegin()->first;
+        setDimensions(d->out_vi, d->executable_network, core, vsapi, !d->flexible_output_prop.empty());
 
         VSCoreInfo core_info;
         vsapi->getCoreInfo2(core, &core_info);
         d->infer_requests.reserve(core_info.numThreads);
+    }
+
+    if (!d->flexible_output_prop.empty()) {
+        auto num_planes = d->executable_network.output(0).get_shape()[1];
+        vsapi->propSetInt(out, "num_planes", static_cast<int>(num_planes), paReplace);
     }
 
     vsapi->createFilter(
@@ -771,6 +782,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit(
 #ifdef ENABLE_VISUALIZATION
         "dot_path:data:opt;"
 #endif
+        "flexible_output_prop:data:opt;"
         , vsOvCreate,
         nullptr,
         plugin
@@ -780,8 +792,10 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit(
         vsapi->propSetData(out, "version", VERSION, -1, paReplace);
 
         std::ostringstream ostream;
-        ostream << IE_VERSION_MAJOR << '.' << IE_VERSION_MINOR << '.' << IE_VERSION_PATCH;
-        vsapi->propSetData(out, "inference_engine_version", ostream.str().c_str(), -1, paReplace);
+        ostream << OPENVINO_VERSION_MAJOR << '.' << OPENVINO_VERSION_MINOR << '.' << OPENVINO_VERSION_PATCH;
+        vsapi->propSetData(out, "openvino_version_build", ostream.str().c_str(), -1, paReplace);
+
+        vsapi->propSetData(out, "openvino_version", ov::get_openvino_version().buildNumber, -1, paReplace);
 
         vsapi->propSetData(
             out, "onnx_version",
@@ -798,13 +812,13 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit(
 
     auto availableDevices = [](const VSMap *, VSMap * out, void *, VSCore *, const VSAPI *vsapi) {
         try {
-            auto core = InferenceEngine::Core();
-            auto devices = core.GetAvailableDevices();
+            auto core = ov::Core();
+            auto devices = core.get_available_devices();
             for (const auto & device : devices) {
                 vsapi->propSetData(out, "devices", device.c_str(), -1, paAppend);
             }
-        } catch (const InferenceEngine::Exception& e) {
-            vsapi->setError(out, ("[IE exception] Initialize inference engine: "s + e.what()).c_str());
+        } catch (const ov::Exception& e) {
+            vsapi->setError(out, ("[OV exception] Initialize inference engine: "s + e.what()).c_str());
         } catch (const std::exception& e) {
             vsapi->setError(out, ("[Standard exception] Initialize inference engine: "s + e.what()).c_str());
         }

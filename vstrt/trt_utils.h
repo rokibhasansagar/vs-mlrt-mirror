@@ -7,7 +7,6 @@
 #include <optional>
 #include <string>
 #include <variant>
-#include <vector>
 
 #include <cuda_runtime.h>
 #include <NvInferRuntime.h>
@@ -255,6 +254,16 @@ size_t getBytesPerSample(nvinfer1::DataType type) noexcept {
             return 1;
         case nvinfer1::DataType::kUINT8:
             return 1;
+#if (NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR) * 10 + NV_TENSORRT_PATCH >= 861
+        case nvinfer1::DataType::kFP8:
+            return 1;
+#endif // (NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR) * 10 + NV_TENSORRT_PATCH >= 861
+#if NV_TENSORRT_MAJOR >= 9
+        case nvinfer1::DataType::kBF16:
+            return 2;
+        case nvinfer1::DataType::kINT64:
+            return 8;
+#endif // NV_TENSORRT_MAJOR >= 9
         default:
             return 0;
     }
@@ -432,7 +441,8 @@ std::variant<ErrorMessage, InferenceInstance> getInstance(
 
 static inline
 std::optional<ErrorMessage> checkEngine(
-    const std::unique_ptr<nvinfer1::ICudaEngine> & engine
+    const std::unique_ptr<nvinfer1::ICudaEngine> & engine,
+    bool flexible_output
 ) noexcept {
 
 #if NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
@@ -497,8 +507,8 @@ std::optional<ErrorMessage> checkEngine(
     }
 
     int out_channels = output_dims.d[1];
-    if (out_channels != 1 && out_channels != 3) {
-        return "output dimensions must be 1 or 3";
+    if (out_channels != 1 && out_channels != 3 && !flexible_output) {
+        return "output dimensions must be 1 or 3, or enable \"flexible_output\"";
     }
 
     int in_height = input_dims.d[2];
@@ -538,7 +548,8 @@ std::optional<ErrorMessage> checkEngine(
 static inline
 std::variant<ErrorMessage, std::unique_ptr<nvinfer1::ICudaEngine>> initEngine(
     const char * engine_data, size_t engine_nbytes,
-    const std::unique_ptr<nvinfer1::IRuntime> & runtime
+    const std::unique_ptr<nvinfer1::IRuntime> & runtime,
+    bool flexible_output
 ) noexcept {
 
     const auto set_error = [](const ErrorMessage & error_message) {
@@ -553,7 +564,7 @@ std::variant<ErrorMessage, std::unique_ptr<nvinfer1::ICudaEngine>> initEngine(
         return set_error("engine deserialization failed");
     }
 
-    if (auto err = checkEngine(engine); err.has_value()) {
+    if (auto err = checkEngine(engine, flexible_output); err.has_value()) {
         return set_error(err.value());
     }
 
@@ -566,11 +577,20 @@ int getSampleType(nvinfer1::DataType type) noexcept {
     switch (type) {
         case nvinfer1::DataType::kFLOAT:
         case nvinfer1::DataType::kHALF:
+#if (NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR) * 10 + NV_TENSORRT_PATCH >= 861
+        case nvinfer1::DataType::kFP8:
+#endif // (NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR) * 10 + NV_TENSORRT_PATCH >= 861
+#if NV_TENSORRT_MAJOR >= 9
+        case nvinfer1::DataType::kBF16:
+#endif // NV_TENSORRT_MAJOR >= 9
             return 1;
         case nvinfer1::DataType::kINT8:
         case nvinfer1::DataType::kINT32:
         case nvinfer1::DataType::kBOOL:
         case nvinfer1::DataType::kUINT8:
+#if NV_TENSORRT_MAJOR >= 9
+        case nvinfer1::DataType::kINT64:
+#endif // NV_TENSORRT_MAJOR >= 9
             return 0;
         default:
             return -1;

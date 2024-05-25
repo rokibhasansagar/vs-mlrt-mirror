@@ -65,13 +65,14 @@ static void setDimensions(
     const std::array<int, 4> & output_shape,
     int bitsPerSample,
     VSCore * core,
-    const VSAPI * vsapi
+    const VSAPI * vsapi,
+    bool flexible_output
 ) noexcept {
 
     vi->height *= output_shape[2] / input_shape[2];
     vi->width *= output_shape[3] / input_shape[3];
 
-    if (output_shape[1] == 1) {
+    if (output_shape[1] == 1 || flexible_output) {
         vi->format = vsapi->registerFormat(cmGray, stFloat, bitsPerSample, 0, 0, core);
     } else if (output_shape[1] == 3) {
         vi->format = vsapi->registerFormat(cmRGB, stFloat, bitsPerSample, 0, 0, core);
@@ -362,6 +363,8 @@ struct vsMIGXData {
     std::mutex ticket_lock;
     TicketSemaphore semaphore;
 
+    std::string flexible_output_prop;
+
     [[nodiscard]] int acquire() noexcept {
         semaphore.acquire();
         {
@@ -434,6 +437,9 @@ static const VSFrameRef *VS_CC vsMIGXGetFrame(
             d->out_vi->format, d->out_vi->width, d->out_vi->height,
             src_frames.front(), core
         );
+
+        std::vector<VSFrameRef *> dst_frames;
+
         auto dst_stride = vsapi->getStride(dst_frame, 0);
         auto dst_bytes = vsapi->getFrameFormat(dst_frame)->bytesPerSample;
 
@@ -461,9 +467,21 @@ static const VSFrameRef *VS_CC vsMIGXGetFrame(
         auto dst_tile_w_bytes = dst_tile_w * dst_bytes;
         auto dst_tile_bytes = dst_tile_h * dst_tile_w_bytes;
         auto dst_planes = d->dst_tile_shape[1];
-        uint8_t * dst_ptrs[3] {};
-        for (int i = 0; i < dst_planes; ++i) {
-            dst_ptrs[i] = vsapi->getWritePtr(dst_frame, i);
+
+        std::vector<uint8_t *> dst_ptrs;
+        if (d->flexible_output_prop.empty()) {
+            for (int i = 0; i < dst_planes; ++i) {
+                dst_ptrs.emplace_back(vsapi->getWritePtr(dst_frame, i));
+            }
+        } else {
+            for (int i = 0; i < dst_planes; ++i) {
+                auto frame { vsapi->newVideoFrame(
+                    d->out_vi->format, d->out_vi->width, d->out_vi->height,
+                    src_frames[0], core
+                )};
+                dst_frames.emplace_back(frame);
+                dst_ptrs.emplace_back(vsapi->getWritePtr(frame, 0));
+            }
         }
 
         auto h_scale = dst_tile_h / src_tile_h;
@@ -476,6 +494,10 @@ static const VSFrameRef *VS_CC vsMIGXGetFrame(
             );
 
             d->release(ticket);
+
+            for (const auto & frame : dst_frames) {
+                vsapi->freeFrame(frame);
+            }
 
             vsapi->freeFrame(dst_frame);
 
@@ -524,6 +546,8 @@ static const VSFrameRef *VS_CC vsMIGXGetFrame(
                 ));
 
                 migraphx_arguments_t outputs;
+
+#ifdef MIGRAPHX_VERSION_TWEAK
                 checkError(migraphx_program_run_async(
                     &outputs,
                     d->program,
@@ -531,6 +555,15 @@ static const VSFrameRef *VS_CC vsMIGXGetFrame(
                     instance.stream.data,
                     "ihipStream_t"
                 ));
+#else // MIGRAPHX_VERSION_TWEAK
+                checkHIPError(hipStreamSynchronize(instance.stream));
+
+                checkError(migraphx_program_run(
+                    &outputs,
+                    d->program,
+                    instance.params
+                ));
+#endif // MIGRAPHX_VERSION_TWEAK
 
                 checkHIPError(hipMemcpyAsync(
                     instance.dst.h_data.data,
@@ -582,6 +615,16 @@ static const VSFrameRef *VS_CC vsMIGXGetFrame(
 
         for (const auto & frame : src_frames) {
             vsapi->freeFrame(frame);
+        }
+
+        if (!d->flexible_output_prop.empty()) {
+            auto prop = vsapi->getFramePropsRW(dst_frame);
+
+            for (int i = 0; i < dst_planes; i++) {
+                auto key { d->flexible_output_prop + std::to_string(i) };
+                vsapi->propSetFrame(prop, key.c_str(), dst_frames[i], paReplace);
+                vsapi->freeFrame(dst_frames[i]);
+            }
         }
 
         return dst_frame;
@@ -702,6 +745,11 @@ static void VS_CC vsMIGXCreate(
         return set_error("\"overlap\" too large");
     }
 
+    auto flexible_output_prop = vsapi->propGetData(in, "flexible_output_prop", 0, &error);
+    if (!error) {
+        d->flexible_output_prop = flexible_output_prop;
+    }
+
     const char * input_name[2];
     const_migraphx_shape_t input_shape;
     size_t input_size;
@@ -716,12 +764,15 @@ static void VS_CC vsMIGXCreate(
         checkError(migraphx_program_parameter_shapes_names(&input_name[0], input_shapes));
         // here we assume that the second parameter corresponds to the input node
         checkError(migraphx_program_parameter_shapes_get(&input_shape, input_shapes, input_name[1]));
+        // TODO: support dynamic shapes
+#ifdef MIGRAPHX_VERSION_TWEAK
         bool is_dynamic;
         checkError(migraphx_shape_dynamic(&is_dynamic, input_shape));
         // TODO
         if (is_dynamic) {
             return set_error("dynamic shape is not supported for now");
         }
+#endif // MIGRAPHX_VERSION_TWEAK
         migraphx_shape_datatype_t type;
         checkError(migraphx_shape_type(&type, input_shape));
         if (type != migraphx_shape_float_type && type != migraphx_shape_half_type) {
@@ -780,12 +831,15 @@ static void VS_CC vsMIGXCreate(
             return set_error("program must have exactly one output");
         }
         checkError(migraphx_shapes_get(&output_shape, output_shapes, 0));
+        // TODO: support dynamic shapes
+#ifdef MIGRAPHX_VERSION_TWEAK
         bool is_dynamic;
         checkError(migraphx_shape_dynamic(&is_dynamic, output_shape));
         // TODO
         if (is_dynamic) {
             return set_error("dynamic shape is not supported for now");
         }
+#endif // MIGRAPHX_VERSION_TWEAK
         migraphx_shape_datatype_t type;
         checkError(migraphx_shape_type(&type, output_shape));
         if (type != migraphx_shape_float_type && type != migraphx_shape_half_type) {
@@ -801,8 +855,8 @@ static void VS_CC vsMIGXCreate(
         if (lengths[0] != 1) {
             return set_error("batch size must be 1");
         }
-        if (lengths[1] != 1 && lengths[1] != 3) {
-            return set_error("output should have 1 or 3 channels");
+        if (lengths[1] != 1 && lengths[1] != 3 && !d->flexible_output_prop.empty()) {
+            return set_error("output should have 1 or 3 channels, or enable \"flexible_output\"");
         }
         if (lengths[2] % tile_h != 0 && lengths[3] % tile_w != 0) {
             return set_error("output dimensions should be integer multiple of input dimensions");
@@ -841,7 +895,15 @@ static void VS_CC vsMIGXCreate(
         return set_error("\"num_streams\" must be 1 for now");
     }
 
-    setDimensions(d->out_vi, d->src_tile_shape, d->dst_tile_shape, bitsPerSample, core, vsapi);
+    setDimensions(
+        d->out_vi,
+        d->src_tile_shape,
+        d->dst_tile_shape,
+        bitsPerSample,
+        core,
+        vsapi,
+        !d->flexible_output_prop.empty()
+    );
 
     // per-stream context
     d->instances.reserve(num_streams);
@@ -877,6 +939,10 @@ static void VS_CC vsMIGXCreate(
         d->tickets.push_back(i);
     }
 
+    if (!d->flexible_output_prop.empty()) {
+        vsapi->propSetInt(out, "num_planes", d->dst_tile_shape[1], paReplace);
+    }
+
     vsapi->createFilter(
         in, out, "Model",
         vsMIGXInit, vsMIGXGetFrame, vsMIGXFree,
@@ -905,6 +971,7 @@ VS_EXTERNAL_API(void) VapourSynthPluginInit(
         "tilesize:int[]:opt;"
         "device_id:int:opt;"
         "num_streams:int:opt;"
+        "flexible_output_prop:data:opt;"
         , vsMIGXCreate,
         nullptr,
         plugin
