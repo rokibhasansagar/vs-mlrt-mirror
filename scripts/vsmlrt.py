@@ -169,7 +169,7 @@ class Backend:
         custom_args: typing.List[str] = field(default_factory=lambda: [])
         engine_folder: typing.Optional[str] = None
 
-        timing_cache: typing.Optional[typing.Union[str,bool]] = r'D:\vstrt.cache'
+        timing_cache: typing.Optional[typing.Union[str,bool]] = r'D:\vstrt.cache' if os.name=='nt' and os.getlogin()=='55087' else None # if it's me LOL
 
         # internal backend attributes
         supports_onnx_serialization: bool = False
