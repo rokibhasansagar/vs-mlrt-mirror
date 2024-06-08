@@ -164,7 +164,9 @@ class Backend:
         builder_optimization_level: int = 3
         max_aux_streams: typing.Optional[int] = None
         short_path: typing.Optional[bool] = False
+        int8: bool = False
         bf16: bool = False
+        fp8: bool = False
         custom_env: typing.Dict[str, str] = field(default_factory=lambda: {})
         custom_args: typing.List[str] = field(default_factory=lambda: [])
         engine_folder: typing.Optional[str] = None
@@ -1756,7 +1758,9 @@ def get_engine_path(
     builder_optimization_level: int,
     max_aux_streams: typing.Optional[int],
     short_path: typing.Optional[bool],
+    int8: bool,
     bf16: bool,
+    fp8: bool,
     engine_folder: typing.Optional[str]
 ) -> str:
 
@@ -1784,7 +1788,9 @@ def get_engine_path(
         shape_str +
         ("_fp16" if fp16 else "") +
         ("_tf32" if tf32 else "") +
+        ("_int8" if int8 else "") +
         ("_bf16" if bf16 else "") +
+        ("_fp8" if fp8 else "") +
         (f"_workspace{workspace}" if workspace is not None else "") +
         f"_opt{builder_optimization_level}" +
         (f"_max-aux-streams{max_aux_streams}" if max_aux_streams is not None else "") +
@@ -1836,7 +1842,9 @@ def trtexec(
     builder_optimization_level: int = 3,
     max_aux_streams: typing.Optional[int] = None,
     short_path: typing.Optional[bool] = None,
+    int8: bool = False,
     bf16: bool = False,
+    fp8: bool = False,
     custom_env: typing.Dict[str, str] = {},
     timing_cache: str = None,
     custom_args: typing.List[str] = [],
@@ -1855,7 +1863,9 @@ def trtexec(
     if force_fp16:
         fp16 = True
         tf32 = False
+        int8 = False
         bf16 = False
+        fp8 = False
 
     engine_paths = get_engine_path(
         network_path=network_path,
@@ -1874,7 +1884,9 @@ def trtexec(
         builder_optimization_level=builder_optimization_level,
         max_aux_streams=max_aux_streams,
         short_path=short_path,
+        int8=int8,
         bf16=bf16,
+        fp8=fp8,
         engine_folder=engine_folder,
     )
 
@@ -2039,9 +2051,14 @@ def trtexec(
         if max_aux_streams is not None:
             args.append(f"--maxAuxStreams={max_aux_streams}")
 
+    if int8:
+        args.append("--int8")
     if trt_version >= (9, 0, 0):
         if bf16:
             args.append("--bf16")
+        
+        if fp8:
+            args.append("--fp8")
 
     args.extend(custom_args)
 
@@ -2460,7 +2477,9 @@ def _inference(
             builder_optimization_level=backend.builder_optimization_level,
             max_aux_streams=backend.max_aux_streams,
             short_path=backend.short_path,
+            int8=backend.int8,
             bf16=backend.bf16,
+            fp8=backend.fp8,
             custom_env=backend.custom_env,
             timing_cache=backend.timing_cache,
             custom_args=backend.custom_args,
