@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
+#include <ios>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -25,11 +26,14 @@
 #include "utils.h"
 
 #ifdef _WIN32
-#include <locale>
-#include <codecvt>
+#define WIN32_LEAN_AND_MEAN
+#include <Windows.h>
+    
 static std::wstring translateName(const char *name) {
-	std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;
-	return converter.from_bytes(name);
+    auto size = MultiByteToWideChar(CP_UTF8, 0, name, -1, nullptr, 0);
+    std::wstring ret(static_cast<size_t>(size), {});
+    MultiByteToWideChar(CP_UTF8, 0, name, -1, ret.data(), size);
+    return ret;
 }
 #else
 #define translateName(n) (n)
@@ -417,15 +421,24 @@ static void VS_CC vsTrtCreate(
         return set_error("open engine failed");
     }
 
-    size_t engine_nbytes = engine_stream.tellg();
+    auto engine_nbytes = engine_stream.tellg();
+    if (engine_nbytes == -1) {
+        return set_error("open engine failed");
+    }
+
     std::unique_ptr<char [], decltype(&free)> engine_data {
-        (char *) malloc(engine_nbytes), free
+        (char *) malloc(static_cast<size_t>(engine_nbytes)), free
     };
     engine_stream.seekg(0, std::ios::beg);
-    engine_stream.read(engine_data.get(), engine_nbytes);
+    engine_stream.read(engine_data.get(), static_cast<std::streamsize>(engine_nbytes));
 
     d->runtime.reset(nvinfer1::createInferRuntime(d->logger));
-    auto maybe_engine = initEngine(engine_data.get(), engine_nbytes, d->runtime, !d->flexible_output_prop.empty());
+    auto maybe_engine = initEngine(
+        engine_data.get(),
+        static_cast<size_t>(engine_nbytes),
+        d->runtime,
+        !d->flexible_output_prop.empty()
+    );
     if (std::holds_alternative<std::unique_ptr<nvinfer1::ICudaEngine>>(maybe_engine)) {
         d->engines.push_back(std::move(std::get<std::unique_ptr<nvinfer1::ICudaEngine>>(maybe_engine)));
     } else {
@@ -534,7 +547,6 @@ static void VS_CC vsTrtCreate(
     if (!d->flexible_output_prop.empty()) {
         const auto & exec_context = d->instances[0].exec_context;
         #if NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
-            auto output_name = exec_context->getEngine().getIOTensorName(1);
             const nvinfer1::Dims & out_dims = exec_context->getTensorShape(output_name);
         #else // NV_TENSORRT_MAJOR * 10 + NV_TENSORRT_MINOR >= 85
             const nvinfer1::Dims & out_dims = exec_context->getBindingDimensions(1);
