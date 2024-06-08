@@ -2068,14 +2068,14 @@ def trtexec(
         if max_aux_streams is not None:
             args.append(f"--maxAuxStreams={max_aux_streams}")
 
+        if fp8:
+            args.append("--fp8")
+
     if int8:
         args.append("--int8")
     if trt_version >= (9, 0, 0):
         if bf16:
             args.append("--bf16")
-        
-        if fp8:
-            args.append("--fp8")
 
     args.extend(custom_args)
 
