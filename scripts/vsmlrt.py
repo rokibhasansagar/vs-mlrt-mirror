@@ -1,4 +1,4 @@
-__version__ = "3.21.6"
+__version__ = "3.21.8"
 
 __all__ = [
     "Backend", "BackendV2",
@@ -919,6 +919,7 @@ class RIFEModel(enum.IntEnum):
     v4_15_lite = 4151
     v4_16_lite = 4161
     v4_17 = 417
+    v4_17_lite = 4171
 
 
 def RIFEMerge(
@@ -1662,6 +1663,7 @@ class ArtCNNModel(enum.IntEnum):
     ArtCNN_C16F64_DS = 3
     ArtCNN_C4F32_Chroma = 4
     ArtCNN_C16F64_Chroma = 5
+    ArtCNN_R16F96 = 6
 
 
 def ArtCNN(
