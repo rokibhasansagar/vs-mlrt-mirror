@@ -1965,7 +1965,7 @@ def trtexec(
         f"--saveEngine={engine_path}"
     ]
 
-    if isinstance(timing_cache, str):
+    if isinstance(timing_cache, (str,os.PathLike) ):
         args.append(f"--timingCacheFile={timing_cache}")
     elif timing_cache is None or timing_cache is True:
         args.append(f"--timingCacheFile={network_path}.cache")
