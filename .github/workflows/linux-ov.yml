@@ -9,7 +9,7 @@ on:
 
 jobs:
   build-linux:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     
     defaults:
       run:
@@ -22,7 +22,9 @@ jobs:
         fetch-depth: 0
 
     - name: Setup Ninja
-      run: pip install ninja
+      run: |
+        sudo rm /usr/lib/python3.*/EXTERNALLY-MANAGED 2>/dev/null
+        pip install ninja
 
     - name: Cache protobuf
       id: cache-protobuf
@@ -36,7 +38,7 @@ jobs:
       if: steps.cache-protobuf.outputs.cache-hit != 'true'
       with:
         repository: protocolbuffers/protobuf
-        # follows protobuf in https://github.com/openvinotoolkit/openvino/tree/2024.1.0/thirdparty/protobuf
+        # follows protobuf in https://github.com/openvinotoolkit/openvino/tree/2024.2.0/thirdparty/protobuf
         # if you change this, remember to bump the version of the cache key.
         ref: fe271ab76f2ad2b2b28c10443865d2af21e27e0e
         fetch-depth: 1
@@ -69,7 +71,7 @@ jobs:
       uses: actions/checkout@v4
       with:
         repository: onnx/onnx
-        # follows onnx in https://github.com/openvinotoolkit/openvino/tree/2024.1.0/thirdparty/onnx
+        # follows onnx in https://github.com/openvinotoolkit/openvino/tree/2024.2.0/thirdparty/onnx
         # if you change this, remember to bump the version of the cache key.
         ref: b86cc54efce19530fb953e4b21f57e6b3888534c
         fetch-depth: 1
@@ -97,13 +99,13 @@ jobs:
 
     - name: Download VapourSynth headers
       run: |
-        wget -q -O vs.zip https://github.com/vapoursynth/vapoursynth/archive/refs/tags/R57.zip
+        wget -q -O vs.zip https://github.com/vapoursynth/vapoursynth/archive/refs/tags/R69.zip
         unzip -q vs.zip
         mv vapoursynth*/ vapoursynth
 
     - name: Setup OpenVINO
       run: |
-        curl -L -o ov.tgz https://storage.openvinotoolkit.org/repositories/openvino/packages/2024.1/linux/l_openvino_toolkit_ubuntu22_2024.1.0.15008.f4afc983258_x86_64.tgz
+        curl -L -o ov.tgz https://storage.openvinotoolkit.org/repositories/openvino/packages/2024.2/linux/l_openvino_toolkit_ubuntu22_2024.2.0.15519.5c0f38f83f6_x86_64.tgz
         tar -xf ov.tgz
         mv l_openvino_* openvino -v
 
