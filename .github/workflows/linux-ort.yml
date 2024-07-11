@@ -10,7 +10,7 @@ on:
 
 jobs:
   build-linux:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     
     defaults:
       run:
@@ -23,7 +23,9 @@ jobs:
         fetch-depth: 0
 
     - name: Setup Ninja
-      run: pip install ninja
+      run: |
+        sudo rm /usr/lib/python3.*/EXTERNALLY-MANAGED 2>/dev/null
+        pip install ninja
 
     - name: Cache protobuf
       id: cache-protobuf
@@ -37,7 +39,7 @@ jobs:
       if: steps.cache-protobuf.outputs.cache-hit != 'true'
       with:
         repository: protocolbuffers/protobuf
-        # follows protobuf in https://github.com/microsoft/onnxruntime/blob/v1.17.1/cmake/external/onnxruntime_external_deps.cmake#L183
+        # follows protobuf in https://github.com/microsoft/onnxruntime/blob/v1.18.0/cmake/external/onnxruntime_external_deps.cmake#L203
         # if you change this, remember to bump the version of the cache key.
         ref: v3.21.12
         fetch-depth: 1
@@ -70,9 +72,9 @@ jobs:
       uses: actions/checkout@v4
       with:
         repository: onnx/onnx
-        # follows onnx in https://github.com/microsoft/onnxruntime/tree/v1.17.1/cmake/external
+        # follows onnx in https://github.com/microsoft/onnxruntime/tree/v1.18.0/cmake/external
         # if you change this, remember to bump the version of the cache key.
-        ref: b86cc54efce19530fb953e4b21f57e6b3888534c
+        ref: 990217f043af7222348ca8f0301e17fa7b841781
         fetch-depth: 1
         path: vsort/onnx
 
@@ -97,22 +99,22 @@ jobs:
 
     - name: Download VapourSynth headers
       run: |
-        wget -q -O vs.zip https://github.com/vapoursynth/vapoursynth/archive/refs/tags/R57.zip
+        wget -q -O vs.zip https://github.com/vapoursynth/vapoursynth/archive/refs/tags/R69.zip
         unzip -q vs.zip
         mv vapoursynth*/ vapoursynth
 
     - name: Setup ONNX Runtime
       run: |
-        curl -L -o ort.tgz https://github.com/microsoft/onnxruntime/releases/download/v1.17.1/onnxruntime-linux-x64-cuda12-1.17.1.tgz
+        curl -L -o ort.tgz https://github.com/microsoft/onnxruntime/releases/download/v1.18.0/onnxruntime-linux-x64-gpu-cuda12-1.18.0.tgz
         tar -xf ort.tgz
         mv onnxruntime-* onnxruntime -v
 
     - name: Setup CUDA
       run: |
-        wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+        wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
         sudo dpkg -i cuda-keyring_1.1-1_all.deb
         sudo apt-get update
-        sudo apt-get install -y cuda-nvcc-12-1 cuda-cudart-dev-12-1
+        sudo apt-get install -y cuda-nvcc-12-5 cuda-cudart-dev-12-5
         echo "PATH=/usr/local/cuda/bin${PATH:+:${PATH}}" >> $GITHUB_ENV
         echo "CUDA_PATH=/usr/local/cuda" >> $GITHUB_ENV
         echo "LD_LIBRARY_PATH=/usr/local/cuda/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" >> $GITHUB_ENV
@@ -145,7 +147,7 @@ jobs:
       run: git describe --tags --long
 
     - name: Upload
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
-        name: vsort-linux-x64-cuda12.1
+        name: vsort-linux-x64-cuda12.5
         path: vsort/artifact
