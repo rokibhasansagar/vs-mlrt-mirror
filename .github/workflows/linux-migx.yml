@@ -9,7 +9,7 @@ on:
 
 jobs:
   build-linux:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     
     defaults:
       run:
@@ -22,11 +22,13 @@ jobs:
         fetch-depth: 0
 
     - name: Setup Ninja
-      run: pip install ninja
+      run: |
+        sudo rm /usr/lib/python3.*/EXTERNALLY-MANAGED 2>/dev/null
+        pip install ninja
 
     - name: Download VapourSynth headers
       run: |
-        wget -q -O vs.zip https://github.com/vapoursynth/vapoursynth/archive/refs/tags/R57.zip
+        wget -q -O vs.zip https://github.com/vapoursynth/vapoursynth/archive/refs/tags/R69.zip
         unzip -q vs.zip
         mv vapoursynth*/ vapoursynth
 
