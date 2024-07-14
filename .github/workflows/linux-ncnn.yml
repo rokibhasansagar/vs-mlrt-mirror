@@ -1,0 +1,173 @@
+name: Build (Linux-NCNN)
+
+on:
+  push:
+    paths:
+      - 'common/**'
+      - 'vsncnn/**'
+      - '.github/workflows/linux-ncnn.yml'
+  workflow_dispatch:
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-24.04
+
+    defaults:
+      run:
+        working-directory: vsncnn
+
+    steps:
+    - name: Checkout repo
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Setup Ninja
+      run: |
+        sudo rm /usr/lib/python3.*/EXTERNALLY-MANAGED 2>/dev/null
+        pip install ninja
+
+    - name: Cache protobuf
+      id: cache-protobuf
+      uses: actions/cache@v4
+      with:
+        path: vsncnn/protobuf/install
+        key: ${{ runner.os }}-vsncnn-protobuf-v1
+
+    - name: Checkout protobuf
+      uses: actions/checkout@v4
+      if: steps.cache-protobuf.outputs.cache-hit != 'true'
+      with:
+        repository: protocolbuffers/protobuf
+        # follows protobuf in https://github.com/microsoft/onnxruntime/blob/v1.18.0/cmake/external/onnxruntime_external_deps.cmake#L203
+        # if you change this, remember to bump the version of the cache key.
+        ref: v3.21.12
+        fetch-depth: 1
+        path: vsncnn/protobuf
+
+    - name: Configure protobuf
+      if: steps.cache-protobuf.outputs.cache-hit != 'true'
+      run: cmake -S protobuf/cmake -B protobuf/build_rel -G Ninja -LA
+        -D CMAKE_BUILD_TYPE=Release
+        -D CMAKE_POSITION_INDEPENDENT_CODE=ON
+        -D protobuf_BUILD_SHARED_LIBS=OFF  -D protobuf_BUILD_TESTS=OFF
+
+    - name: Build protobuf
+      if: steps.cache-protobuf.outputs.cache-hit != 'true'
+      run: cmake --build protobuf/build_rel --verbose
+
+    - name: Install protobuf
+      if: steps.cache-protobuf.outputs.cache-hit != 'true'
+      run: |
+        cmake --install protobuf/build_rel --prefix protobuf/install
+        sudo cmake --install protobuf/build_rel --prefix /usr
+
+    - name: Cache onnx
+      id: cache-onnx
+      uses: actions/cache@v4
+      with:
+        path: vsncnn/onnx/install
+        key: ${{ runner.os }}-vsncnn-onnx-v1
+
+    - name: Checkout onnx
+      if: steps.cache-onnx.outputs.cache-hit != 'true'
+      uses: actions/checkout@v4
+      with:
+        repository: onnx/onnx
+        # follows onnx in https://github.com/microsoft/onnxruntime/tree/v1.18.0/cmake/external
+        # if you change this, remember to bump the version of the cache key.
+        ref: 990217f043af7222348ca8f0301e17fa7b841781
+        fetch-depth: 1
+        path: vsncnn/onnx
+
+    - name: Configure onnx
+      if: steps.cache-onnx.outputs.cache-hit != 'true'
+      run: cmake -S onnx -B onnx/build -G Ninja -LA
+        -D CMAKE_BUILD_TYPE=Release
+        -D CMAKE_POSITION_INDEPENDENT_CODE=ON
+        -D Protobuf_PROTOC_EXECUTABLE=protobuf/install/bin/protoc
+        -D Protobuf_LITE_LIBRARY=protobuf/install/lib
+        -D Protobuf_LIBRARIES=protobuf/install/lib
+        -D ONNX_USE_LITE_PROTO=ON -D ONNX_USE_PROTOBUF_SHARED_LIBS=OFF
+        -D ONNX_GEN_PB_TYPE_STUBS=OFF -D ONNX_ML=0
+        -D ONNX_INCLUDE_DIRS=protobuf/install/include
+
+    - name: Build onnx
+      if: steps.cache-onnx.outputs.cache-hit != 'true'
+      run: cmake --build onnx/build --verbose
+
+    - name: Install onnx
+      if: steps.cache-onnx.outputs.cache-hit != 'true'
+      run: |
+        cmake --install onnx/build --prefix onnx/install
+        sudo cmake --install onnx/build --prefix /usr
+
+    - name: Download VapourSynth headers
+      run: |
+        wget -q -O vs.zip https://github.com/vapoursynth/vapoursynth/archive/refs/tags/R69.zip
+        unzip -q vs.zip
+        mv vapoursynth*/ vapoursynth
+
+    - name: Download NCNN (shared) Precompilation
+      run: |
+        curl -sL -o ncnn.zip "https://github.com/Tencent/ncnn/releases/download/20240410/ncnn-20240410-ubuntu-2204-shared.zip"
+        unzip -q ncnn.zip
+        mv ncnn-20240410* ncnn -v
+        cmake -S ncnn -B ncnn/build -G Ninja -LA -D CMAKE_BUILD_TYPE=Release || true
+        sudo cmake --install ncnn/build --prefix /usr || true
+        echo "PATH=${PWD}/ncnn/bin${PATH:+:${PATH}}" >> $GITHUB_ENV
+        echo "LD_LIBRARY_PATH=${PWD}/ncnn/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}" >> $GITHUB_ENV
+        sudo cp -aR -v ${PWD}/ncnn/include/ncnn /usr/include/ || true
+
+    - name: Setup Vulkan SDK
+      run: |
+        curl -sL "https://sdk.lunarg.com/sdk/download/latest/linux/vulkan-sdk.tar.xz" -O
+        mkdir -p vk-latest
+        tar -xf vulkan-sdk.tar.xz -C vk-latest --strip-components=1
+        source vk-latest/setup-env.sh
+        echo "VULKAN_SDK=$VULKAN_SDK" >>$GITHUB_ENV
+        echo "LD_LIBRARY_PATH=$VULKAN_SDK/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >>$GITHUB_ENV
+        echo "$VULKAN_SDK/bin" >>$GITHUB_PATH
+
+        # wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo tee /etc/apt/trusted.gpg.d/lunarg.asc
+        # sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-jammy.list https://packages.lunarg.com/vulkan/lunarg-vulkan-jammy.list
+        # sudo apt update -qy && sudo apt install vulkan-sdk -qy
+
+    - name: Configure
+      run: |
+        source vk-latest/setup-env.sh
+        # sudo cp -aR -v protobuf/install/include/google /usr/include/ || true
+        cmake -S . -B build -G Ninja -LA \
+          -D CMAKE_BUILD_TYPE=Release \
+          -D CMAKE_CXX_FLAGS="-Wall -ffast-math -march=x86-64-v3" \
+          -D VAPOURSYNTH_INCLUDE_DIRECTORY="`pwd`/vapoursynth/include" \
+          -D protobuf_DIR=protobuf/install/lib/cmake/protobuf \
+          -D ONNX_DIR=onnx/install/lib/cmake/ONNX \
+          -D ONNX_INCLUDE_DIRS=protobuf/install/include \
+          -D ncnn_DIR=ncnn/lib/cmake/ncnn \
+          -D CMAKE_CXX_STANDARD=20
+      # env:
+        # VULKAN_SDK: ${{ env.VULKAN_SDK }}
+
+    - name: Build
+      run: |
+        source vk-latest/setup-env.sh
+        cmake --build build --verbose
+
+    - name: Install
+      run: cmake --install build --prefix install
+
+    - name: Prepare for upload
+      run: |
+        mkdir artifact
+        cp -v install/lib/*.so artifact
+
+    - name: Describe
+      run: git describe --tags --long
+
+    - name: Upload
+      uses: actions/upload-artifact@v4
+      with:
+        name: vsncnn-linux-x64
+        path: vsncnn/artifact
+
